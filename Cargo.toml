@@ -14,25 +14,23 @@ wukong-core = { path = "crates/core" }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-crossterm = "0.28"
 notify = "8"
 ratatui = "0.29"
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 serde_json = "1"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio = { version = "1", features = [
-    "rt-multi-thread",
+    "rt",
     "macros",
     "net",
     "time",
     "sync",
     "io-util",
     "signal",
-    "process",
-    "fs",
 ] }
 toml = "0.8"
 
