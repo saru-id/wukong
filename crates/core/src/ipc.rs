@@ -5,7 +5,7 @@
 use crate::events::{Event, InboxItem, Resolution};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
@@ -27,13 +27,28 @@ impl Envelope {
 pub enum Request {
     Ping,
     Status,
-    Track { path: String },
-    Untrack { path: String },
+    Track {
+        path: String,
+    },
+    Untrack {
+        path: String,
+    },
     TrackedList,
     InboxList,
-    InboxResolve { id: i64, resolution: Resolution },
-    Events { limit: usize },
+    InboxResolve {
+        id: i64,
+        resolution: Resolution,
+    },
+    Events {
+        limit: usize,
+    },
     PushNow,
+    /// Copy stored files back to their live locations (new-machine
+    /// bootstrap). No path = all stored files.
+    Restore {
+        path: Option<String>,
+        force: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -21,6 +21,7 @@ pub enum StoreError {
     Git { args: String, stderr: String },
 }
 
+#[derive(Clone)]
 pub struct Store {
     dir: PathBuf,
     branch: String,
@@ -28,23 +29,55 @@ pub struct Store {
 
 impl Store {
     /// Open (initializing if needed) the store on this machine's
-    /// branch. Identity is repo-local so commits read as wukong's.
+    /// branch. Identity is repo-local so commits read as wukong's, and
+    /// is (re)applied on every open so cloned stores get it too.
     pub fn open(dir: &Path, machine: &str) -> Result<Self, StoreError> {
         let store = Self {
             dir: dir.to_path_buf(),
             branch: machine.to_string(),
         };
         if !dir.join(".git").exists() {
-            std::fs::create_dir_all(dir).map_err(|source| StoreError::Io {
+            paths::ensure_private_dir(dir).map_err(|source| StoreError::Io {
                 path: dir.to_path_buf(),
                 source,
             })?;
             store.git(&["init", "-b", machine])?;
-            store.git(&["config", "user.name", "wukong"])?;
-            store.git(&["config", "user.email", &format!("wukong@{machine}")])?;
-            // The store never wants an editor, a pager, or signing.
-            store.git(&["config", "commit.gpgsign", "false"])?;
         }
+        store.git(&["config", "user.name", "wukong"])?;
+        store.git(&["config", "user.email", &format!("wukong@{machine}")])?;
+        // The store never wants an editor, a pager, or signing.
+        store.git(&["config", "commit.gpgsign", "false"])?;
+        Ok(store)
+    }
+
+    /// Bootstrap a store by cloning an existing remote, then switch to
+    /// this machine's branch (creating it from the clone's HEAD if the
+    /// machine is new — its history starts where another machine's
+    /// left off, which is exactly what `restore` wants).
+    pub fn clone_from(remote: &str, dir: &Path, machine: &str) -> Result<Self, StoreError> {
+        if let Some(parent) = dir.parent() {
+            paths::ensure_private_dir(parent).map_err(|source| StoreError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let out = Command::new("git")
+            .args(["clone", "--quiet", remote])
+            .arg(dir)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .map_err(|source| StoreError::Io {
+                path: dir.to_path_buf(),
+                source,
+            })?;
+        if !out.status.success() {
+            return Err(StoreError::Git {
+                args: format!("clone {remote}"),
+                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            });
+        }
+        let store = Self::open(dir, machine)?;
+        store.git(&["checkout", "-q", "-B", machine])?;
         Ok(store)
     }
 
@@ -60,6 +93,15 @@ impl Store {
         let out = Command::new("git")
             .arg("-C")
             .arg(&self.dir)
+            // The store must be immune to the user's global git
+            // machinery: no hooks firing on wukong's commits, no
+            // global excludes silently swallowing a dotfile.
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.excludesFile=/dev/null",
+            ])
             .args(args)
             .env("GIT_TERMINAL_PROMPT", "0")
             .output()
@@ -107,22 +149,37 @@ impl Store {
         }
     }
 
-    /// Stage everything and commit if anything actually changed.
-    pub fn commit(&self, message: &str) -> Result<Option<String>, StoreError> {
-        self.git(&["add", "-A"])?;
-        if self.git(&["status", "--porcelain"])?.is_empty() {
+    /// Stage one path and commit if it actually changed. Staging is
+    /// scoped so an unrelated half-mirrored file can never ride along
+    /// under this commit's message.
+    pub fn commit(&self, rel: &Path, message: &str) -> Result<Option<String>, StoreError> {
+        let rel_str = rel.to_string_lossy();
+        self.git(&["add", "-A", "--", &rel_str])?;
+        if self
+            .git(&["status", "--porcelain", "--", &rel_str])?
+            .is_empty()
+        {
             return Ok(None);
         }
-        self.git(&["commit", "-q", "-m", message])?;
+        self.git(&["commit", "-q", "-m", message, "--", &rel_str])?;
         Ok(Some(self.git(&["rev-parse", "--short", "HEAD"])?))
     }
 
     /// The diff between the stored copy and live content, for inbox
-    /// display. Uses git's word-level machinery via a temp blob-less
-    /// `--no-index` diff.
+    /// display. The scratch file lives in wukong's own 0700 state dir,
+    /// never in the world-readable system temp dir — live content can
+    /// hold secrets.
     pub fn diff_against_live(&self, live: &Path, live_content: &str) -> String {
         let stored = self.dir.join(paths::store_rel(live));
-        let tmp = std::env::temp_dir().join(format!("wukong-diff-{}", std::process::id()));
+        let state = paths::state_dir();
+        if paths::ensure_private_dir(&state).is_err() {
+            return String::new();
+        }
+        // Pid alone is not unique enough: several threads (tests, a
+        // future multi-engine world) may diff at once.
+        static SCRATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SCRATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = state.join(format!("diff-scratch-{}-{n}", std::process::id()));
         if std::fs::write(&tmp, live_content).is_err() {
             return String::new();
         }
@@ -171,6 +228,16 @@ impl Store {
         })
     }
 
+    /// Every file in the mirror, as store-relative paths.
+    pub fn files(&self) -> Result<Vec<PathBuf>, StoreError> {
+        Ok(self
+            .git(&["ls-files"])?
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(PathBuf::from)
+            .collect())
+    }
+
     pub fn ensure_remote(&self, url: &str) -> Result<(), StoreError> {
         match self.git(&["remote", "get-url", "origin"]) {
             Ok(current) if current == url => Ok(()),
@@ -212,27 +279,37 @@ mod tests {
         let store = Store::open(&tmp.path().join("store"), "testbox").unwrap();
 
         // Nothing to commit on an empty store.
-        assert!(store.commit("empty").unwrap().is_none());
+        assert!(store.commit(Path::new("."), "empty").unwrap().is_none());
 
         let live = paths::home().join(".wukong-test-zshrc");
-        store.mirror_in(&live, b"export A=1\n").unwrap();
-        let sha = store.commit("zshrc: initial").unwrap();
+        let rel = store.mirror_in(&live, b"export A=1\n").unwrap();
+        let sha = store.commit(&rel, "zshrc: initial").unwrap();
         assert!(sha.is_some());
 
         // Identical content → no new commit.
         store.mirror_in(&live, b"export A=1\n").unwrap();
-        assert!(store.commit("zshrc: same").unwrap().is_none());
+        assert!(store.commit(&rel, "zshrc: same").unwrap().is_none());
 
         // Changed content → commits again.
         store.mirror_in(&live, b"export A=2\n").unwrap();
-        assert!(store.commit("zshrc: changed").unwrap().is_some());
+        assert!(store.commit(&rel, "zshrc: changed").unwrap().is_some());
+
+        // A stray file in the store never rides along on a scoped commit.
+        std::fs::write(store.dir().join("stray-file"), "oops").unwrap();
+        store.mirror_in(&live, b"export A=2b\n").unwrap();
+        store.commit(&rel, "zshrc: scoped").unwrap();
+        let shown = store
+            .git(&["show", "--stat", "--name-only", "HEAD"])
+            .unwrap();
+        assert!(!shown.contains("stray-file"), "{shown}");
+        std::fs::remove_file(store.dir().join("stray-file")).unwrap();
 
         // Diff shows the change against newer live content.
         let diff = store.diff_against_live(&live, "export A=3\n");
-        assert!(diff.contains("-export A=2"), "{diff}");
+        assert!(diff.contains("-export A=2b"), "{diff}");
         assert!(diff.contains("+export A=3"), "{diff}");
 
         store.remove(&live).unwrap();
-        assert!(store.commit("zshrc: removed").unwrap().is_some());
+        assert!(store.commit(&rel, "zshrc: removed").unwrap().is_some());
     }
 }

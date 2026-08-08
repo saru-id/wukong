@@ -22,6 +22,9 @@ pub mod kind {
     pub const QUARANTINED: &str = "quarantined";
     pub const SENTINEL: &str = "sentinel-changed";
     pub const RESOLVED: &str = "inbox-resolved";
+    pub const PUSH_FAILED: &str = "push-failed";
+    pub const RESTORED: &str = "restored";
+    pub const HELD: &str = "held";
 }
 
 pub use kind as EventKind;
@@ -34,7 +37,12 @@ pub struct InboxItem {
     pub subject: String,
     pub detail: String,
     /// The evidence: a diff, masked findings, or a file excerpt.
+    /// Always passes through the gate's masking before storage.
     pub body: String,
+    /// Machine-readable extras — for quarantines, the findings'
+    /// fingerprints as a JSON array.
+    #[serde(default)]
+    pub meta: String,
 }
 
 /// Inbox item kinds.

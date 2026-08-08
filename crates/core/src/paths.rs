@@ -19,6 +19,39 @@ pub fn home() -> PathBuf {
     HOME.clone()
 }
 
+/// Canonicalize a path that may not (yet) exist: resolve symlinks on
+/// the parent directory and rejoin the file name. Everything that
+/// compares against watcher-reported paths must pass through here —
+/// macOS reports real paths, and `/etc`, `/var`, and `/tmp` are all
+/// symlinks into `/private`.
+pub fn canonicalize_lenient(path: &Path) -> PathBuf {
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return canon;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) => std::fs::canonicalize(dir)
+            .map(|canon| canon.join(name))
+            .unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Create a directory (and parents) readable by the owner only. The
+/// config, data, and state trees hold mirrored dotfiles, quarantine
+/// evidence, and the socket — none of it is other users' business.
+pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    match std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+    {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 fn xdg(var: &str, fallback: &str) -> PathBuf {
     std::env::var_os(var)
         .map(PathBuf::from)

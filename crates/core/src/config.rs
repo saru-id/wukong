@@ -23,6 +23,9 @@ pub struct Config {
     pub sentinels: Vec<String>,
     /// macOS notification on new inbox items.
     pub notifications: bool,
+    /// Paths under sentinel roots that are never offered for tracking
+    /// (wukong's own config, cache-like churn).
+    pub exclude: Vec<String>,
 }
 
 impl Default for Config {
@@ -34,6 +37,7 @@ impl Default for Config {
             push_interval_secs: 300,
             sentinels: default_sentinels(),
             notifications: true,
+            exclude: vec!["~/.config/wukong".to_string()],
         }
     }
 }
@@ -59,11 +63,20 @@ fn default_sentinels() -> Vec<String> {
 }
 
 impl Config {
-    pub fn load() -> Self {
-        std::fs::read_to_string(paths::config_file())
-            .ok()
-            .and_then(|text| toml::from_str(&text).ok())
-            .unwrap_or_default()
+    /// `Ok(None)` = no config file yet (fresh machine). A file that
+    /// exists but fails to parse is an error the user must see — the
+    /// old behavior of silently falling back to defaults turned a typo
+    /// into a mystifying "not initialized".
+    pub fn load() -> Result<Option<Self>, String> {
+        let path = paths::config_file();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("cannot read {}: {e}", paths::display(&path))),
+        };
+        toml::from_str(&text)
+            .map(Some)
+            .map_err(|e| format!("{} does not parse: {e}", paths::display(&path)))
     }
 
     pub fn save(&self) -> std::io::Result<()> {
@@ -75,14 +88,28 @@ impl Config {
         std::fs::write(path, text)
     }
 
-    /// Sentinel entries expanded to absolute paths.
+    /// Sentinel entries as canonical absolute paths — `/etc` is a
+    /// symlink into `/private` on macOS, and the watcher reports real
+    /// paths, so comparisons must happen on the canonical form.
     pub fn sentinel_paths(&self) -> Vec<PathBuf> {
-        self.sentinels
-            .iter()
-            .map(|s| match s.strip_prefix("~/") {
+        expand_all(&self.sentinels)
+    }
+
+    /// Exclude entries, canonical like the sentinels.
+    pub fn exclude_paths(&self) -> Vec<PathBuf> {
+        expand_all(&self.exclude)
+    }
+}
+
+fn expand_all(entries: &[String]) -> Vec<PathBuf> {
+    entries
+        .iter()
+        .map(|s| {
+            let raw = match s.strip_prefix("~/") {
                 Some(rel) => paths::home().join(rel),
                 None => PathBuf::from(s),
-            })
-            .collect()
-    }
+            };
+            paths::canonicalize_lenient(&raw)
+        })
+        .collect()
 }

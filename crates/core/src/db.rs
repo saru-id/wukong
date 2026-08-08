@@ -5,6 +5,7 @@
 
 use crate::events::{Event, InboxItem, Resolution};
 use rusqlite::{Connection, params};
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -49,7 +50,27 @@ impl Db {
                 resolved    INTEGER NOT NULL DEFAULT 0,
                 resolution  TEXT,
                 resolved_ts TEXT
+            );
+            CREATE TABLE IF NOT EXISTS allowances (
+                path        TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                action      TEXT NOT NULL,
+                created_ts  TEXT NOT NULL,
+                PRIMARY KEY (path, fingerprint)
             );",
+        )?;
+        // Additive migration: the meta column (finding fingerprints as
+        // JSON) arrived after v0.1.0 databases existed.
+        let has_meta = conn
+            .prepare("SELECT 1 FROM pragma_table_info('inbox') WHERE name = 'meta'")?
+            .exists([])?;
+        if !has_meta {
+            conn.execute_batch("ALTER TABLE inbox ADD COLUMN meta TEXT NOT NULL DEFAULT ''")?;
+        }
+        // Keep the event log from growing without bound.
+        conn.execute(
+            "DELETE FROM events WHERE id <= (SELECT COALESCE(MAX(id), 0) - 10000 FROM events)",
+            [],
         )?;
         Ok(Self { conn })
     }
@@ -135,36 +156,63 @@ impl Db {
             })?)
     }
 
+    // ---- Allowances ----------------------------------------------------
+
+    /// Record a sticky resolution for one finding: `approve` (the
+    /// secret may be committed as-is) or `redact` (mask it in every
+    /// future stored copy). Consulted by the engine on every scan, so
+    /// resolving a long-lived token once is enough.
+    pub fn allow(&self, path: &str, fingerprint: &str, action: &str) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO allowances (path, fingerprint, action, created_ts)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![path, fingerprint, action, now()],
+        )?;
+        Ok(())
+    }
+
+    /// fingerprint → action for one file.
+    pub fn allowances_for(&self, path: &str) -> Result<HashMap<String, String>, DbError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT fingerprint, action FROM allowances WHERE path = ?1")?;
+        let rows = stmt.query_map(params![path], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     // ---- Inbox ---------------------------------------------------------
 
     /// Add an inbox item, or refresh the body of an existing open item
     /// with the same kind and subject — a sentinel that keeps changing
-    /// is one conversation, not twelve.
+    /// is one conversation, not twelve. `meta` carries the findings'
+    /// fingerprints as JSON so a resolution can persist them.
     pub fn inbox_add(
         &self,
         kind: &str,
         subject: &str,
         detail: &str,
         body: &str,
+        meta: &str,
     ) -> Result<InboxOutcome, DbError> {
         let updated = self.conn.execute(
-            "UPDATE inbox SET ts = ?1, detail = ?2, body = ?3
-             WHERE kind = ?4 AND subject = ?5 AND resolved = 0",
-            params![now(), detail, body, kind, subject],
+            "UPDATE inbox SET ts = ?1, detail = ?2, body = ?3, meta = ?4
+             WHERE kind = ?5 AND subject = ?6 AND resolved = 0",
+            params![now(), detail, body, meta, kind, subject],
         )?;
         if updated > 0 {
             return Ok(InboxOutcome::Refreshed);
         }
         self.conn.execute(
-            "INSERT INTO inbox (ts, kind, subject, detail, body) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![now(), kind, subject, detail, body],
+            "INSERT INTO inbox (ts, kind, subject, detail, body, meta)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![now(), kind, subject, detail, body, meta],
         )?;
         Ok(InboxOutcome::New)
     }
 
     pub fn inbox_open(&self) -> Result<Vec<InboxItem>, DbError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, ts, kind, subject, detail, body FROM inbox
+            "SELECT id, ts, kind, subject, detail, body, meta FROM inbox
              WHERE resolved = 0 ORDER BY id",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -175,6 +223,7 @@ impl Db {
                 subject: row.get(3)?,
                 detail: row.get(4)?,
                 body: row.get(5)?,
+                meta: row.get(6)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -190,7 +239,7 @@ impl Db {
 
     pub fn inbox_get(&self, id: i64) -> Result<Option<InboxItem>, DbError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, ts, kind, subject, detail, body FROM inbox
+            "SELECT id, ts, kind, subject, detail, body, meta FROM inbox
              WHERE id = ?1 AND resolved = 0",
         )?;
         let mut rows = stmt.query_map(params![id], |row| {
@@ -201,6 +250,7 @@ impl Db {
                 subject: row.get(3)?,
                 detail: row.get(4)?,
                 body: row.get(5)?,
+                meta: row.get(6)?,
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -248,27 +298,67 @@ mod tests {
     }
 
     #[test]
+    fn allowances_round_trip() {
+        let db = db();
+        db.allow(".zshrc", "aabbccdd", "approve").unwrap();
+        db.allow(".zshrc", "11223344", "redact").unwrap();
+        db.allow(".gitconfig", "99999999", "approve").unwrap();
+        let a = db.allowances_for(".zshrc").unwrap();
+        assert_eq!(a.len(), 2);
+        assert_eq!(a.get("aabbccdd").map(String::as_str), Some("approve"));
+        assert_eq!(a.get("11223344").map(String::as_str), Some("redact"));
+        // Re-resolving overwrites the action.
+        db.allow(".zshrc", "aabbccdd", "redact").unwrap();
+        let a = db.allowances_for(".zshrc").unwrap();
+        assert_eq!(a.get("aabbccdd").map(String::as_str), Some("redact"));
+    }
+
+    #[test]
+    fn v010_database_gains_meta_column() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("old.db");
+        // A pre-meta inbox table, as v0.1.0 created it.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE inbox (
+                id INTEGER PRIMARY KEY, ts TEXT NOT NULL, kind TEXT NOT NULL,
+                subject TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '', resolved INTEGER NOT NULL DEFAULT 0,
+                resolution TEXT, resolved_ts TEXT
+            );
+            INSERT INTO inbox (ts, kind, subject) VALUES ('t', 'sentinel', '.zshrc');",
+        )
+        .unwrap();
+        drop(conn);
+        let db = Db::open(&path).unwrap();
+        let open = db.inbox_open().unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].meta, "");
+    }
+
+    #[test]
     fn inbox_dedupes_open_items_by_subject() {
         let db = db();
         assert_eq!(
-            db.inbox_add("sentinel", ".zprofile", "changed", "v1")
+            db.inbox_add("sentinel", ".zprofile", "changed", "v1", "")
                 .unwrap(),
             InboxOutcome::New
         );
         assert_eq!(
-            db.inbox_add("sentinel", ".zprofile", "changed again", "v2")
+            db.inbox_add("sentinel", ".zprofile", "changed again", "v2", "[\"fp1\"]")
                 .unwrap(),
             InboxOutcome::Refreshed
         );
         let open = db.inbox_open().unwrap();
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].body, "v2");
+        assert_eq!(open[0].meta, "[\"fp1\"]");
 
         assert!(db.inbox_resolve(open[0].id, Resolution::Ignore).unwrap());
         assert_eq!(db.inbox_count().unwrap(), 0);
         // Resolved item stays resolved; a new change opens a new item.
         assert_eq!(
-            db.inbox_add("sentinel", ".zprofile", "later", "v3")
+            db.inbox_add("sentinel", ".zprofile", "later", "v3", "")
                 .unwrap(),
             InboxOutcome::New
         );
