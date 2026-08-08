@@ -16,10 +16,18 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
   commits to a private mirror repo on this machine's branch, with a
   generated message, and pushes on a timer.
 - **The secret gate.** No change reaches a commit without passing a
-  built-in scanner (known credential shapes + high-entropy strings) and
-  a hard denylist of files that are never trackable (private keys,
-  `.env`). A hit is held in the review inbox, never in git — approve,
-  redact, or ignore. This cannot be disabled globally, only per finding.
+  built-in scanner (a curated set of credential shapes plus a
+  charset-aware entropy check that catches hex and base64 tokens too)
+  and a denylist of files that are never trackable (private keys,
+  `.env`). A hit is held in the review inbox, never in git — and the
+  evidence stored with it is masked, so the database never holds a raw
+  secret either. The gate cannot be disabled globally, only per
+  finding.
+- **Resolutions stick.** Every finding has a fingerprint of the secret
+  itself. Approve it once and that token commits forever without
+  another prompt; redact it once and every future stored copy masks it
+  automatically (the live file is never touched). Rotate the token and
+  the new value quarantines fresh, exactly as it should.
 - **Side-effect discovery.** The daemon watches a sentinel set it does
   not track — your shell startup files, `~/.config`, launchd agents —
   and when an installer edits one, it lands in the inbox as
@@ -48,6 +56,10 @@ cargo build --release
 wukong track ~/.zshrc             # its changes now commit on their own
 wukong                            # the dashboard
 ```
+
+On a new machine, point `wukong init` at your existing store remote:
+it clones the store, branches for the machine, and `wukong restore`
+copies every stored file into place and tracks it.
 
 State lives under XDG: config in `~/.config/wukong`, the store repo and
 database in `~/.local/share/wukong`, the socket in `~/.local/state`.

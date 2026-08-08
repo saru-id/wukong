@@ -20,6 +20,16 @@ much later phase.
   `gate::scan` clearing it. Never add a path that commits file content
   without going through the gate. New credential patterns are welcome;
   weakening the gate is not.
+- **Resolutions are sticky, per fingerprint.** Approve/redact store a
+  (path, fingerprint, action) allowance the engine applies on every
+  scan. The redacted store copy is re-scanned before commit and held if
+  anything unexpected survives — keep that verification step.
+- **Inbox bodies are masked evidence.** Diffs and excerpts pass through
+  `gate::mask_all` before hitting SQLite. Never store raw file content
+  or an unmasked diff in the inbox.
+- **Binary files** (NUL in the first 8KB) pass the content gate — line
+  rules over lossy text would spray entropy false positives. The
+  forbidden-name layer still applies.
 - The engine (`wukongd/src/engine.rs`) is the single owner of all
   mutable state. One writer, no shared locks. Keep it that way.
 - Conventional Commits. Leave work uncommitted unless asked.
@@ -35,11 +45,23 @@ much later phase.
 - **Store churn must be ignored.** The watcher sees the store's own
   `.git` writes; `touch` filters anything under the store dir and any
   path with a `.git` component. Do not remove that filter.
-- **Watch roots are dynamic.** They can't all be known at boot (a
-  not-yet-created sentinel, a file tracked later). The engine
-  accumulates `watch_requests`; main drains them after each client
-  request. Sentinels that don't exist yet are covered by watching their
-  parent dir.
+- **Watch roots are dynamic and almost always non-recursive.** File
+  sentinels and tracked files watch their PARENT dir non-recursively
+  (survives atomic renames and not-yet-created files); only deliberate
+  directory sentinels (~/.config) watch recursively. Never let a
+  missing sentinel escalate to a recursive watch of $HOME — that was a
+  real bug. The engine accumulates `watch_requests`; main drains them
+  after each client request.
+- **The hot path stays in memory.** `touch` consults the in-memory
+  roster and precomputed sentinel lists — no SQLite per event. Keep it
+  that way; a cargo build under a watched root fires thousands of
+  events per second.
+- **Push runs off-loop** on spawn_blocking; the engine only tracks
+  `push_in_flight`. Nothing else that blocks on the network belongs in
+  the event loop.
+- **One daemon.** Startup connects to the socket first and exits if
+  someone answers. Don't remove that guard: launchd KeepAlive plus a
+  manual start would otherwise double-commit.
 
 ## Verification
 
@@ -51,10 +73,17 @@ cargo nextest run
 
 For the daemon, run the isolated live drill: point `HOME` and the three
 `XDG_*` vars at a tempdir, write a `config.toml` with a bare-repo
-remote, start `wukongd`, then exercise track → edit → auto-commit,
-paste a fake credential (must quarantine, must NOT enter git — grep the
-store and remote to prove it), and change a sentinel (must appear in the
-inbox). Never run the daemon against the real `$HOME` while testing.
+remote, start `wukongd`, then exercise the full loop: track → edit →
+auto-commit (summary must be `+N lines`, not `updated`), a
+`FOO_TOKEN=`-shaped secret and a 64-char hex secret (both must
+quarantine; the sqlite inbox body must NOT contain the raw token),
+approve → next edit must NOT re-quarantine, redact → store masked +
+live untouched + sticky, an untracked sentinel change (must be
+offered), a `credentials.json` under a sentinel dir (must NOT be
+offered), `wukong push` (reply must reflect the real result; the
+redacted secret must never appear in `git log -p` on the remote), and
+`wukong restore`. Never run the daemon against the real `$HOME` while
+testing.
 
 ## Runtime paths
 
