@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/wukongd", "crates/wukong"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+rust-version = "1.97"
+license = "MIT"
+
+[workspace.dependencies]
+wukong-core = { path = "crates/core" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+notify = "8"
+ratatui = "0.29"
+regex = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "time",
+    "sync",
+    "io-util",
+    "signal",
+    "process",
+    "fs",
+] }
+toml = "0.8"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+strip = true
