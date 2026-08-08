@@ -15,7 +15,7 @@ use ratatui::{Frame, Terminal};
 use std::io::stdout;
 use std::time::{Duration, Instant};
 use wukong_core::events::Resolution;
-use wukong_core::ipc::{Request, Response, StatusInfo, TrackedFile};
+use wukong_core::ipc::{PkgEntry, Request, Response, StatusInfo, TrackedFile};
 
 const GOLD: Color = Color::Rgb(0xE0, 0xA5, 0x2A);
 
@@ -48,6 +48,7 @@ struct Data {
     inbox: Vec<wukong_core::events::InboxItem>,
     files: Vec<TrackedFile>,
     events: Vec<wukong_core::events::Event>,
+    packages: Vec<PkgEntry>,
 }
 
 struct App {
@@ -128,6 +129,9 @@ impl App {
         if let Ok(Response::Events { events }) = client::call(Request::Events { limit: 200 }) {
             self.data.events = events;
         }
+        if let Ok(Response::Packages { entries }) = client::call(Request::PkgList) {
+            self.data.packages = entries;
+        }
         let len = self.list_len();
         if self.selected >= len {
             self.selected = len.saturating_sub(1);
@@ -139,7 +143,7 @@ impl App {
             Tab::Inbox => self.data.inbox.len(),
             Tab::Files => self.data.files.len(),
             Tab::Activity => self.data.events.len(),
-            Tab::Packages => 0,
+            Tab::Packages => self.data.packages.len(),
         }
     }
 
@@ -222,6 +226,7 @@ impl App {
                 let count = match t {
                     Tab::Inbox => self.data.inbox.len(),
                     Tab::Files => self.data.files.len(),
+                    Tab::Packages => self.data.packages.len(),
                     _ => 0,
                 };
                 let label = if count > 0 {
@@ -277,10 +282,17 @@ impl App {
             .inbox
             .iter()
             .map(|item| {
-                let tag = if item.kind == wukong_core::events::InboxKind::QUARANTINE {
-                    Span::styled("secret ", Style::default().fg(Color::Red))
-                } else {
-                    Span::styled("track? ", Style::default().fg(GOLD))
+                let tag = match item.kind.as_str() {
+                    wukong_core::events::InboxKind::QUARANTINE => {
+                        Span::styled("secret ", Style::default().fg(Color::Red))
+                    }
+                    wukong_core::events::InboxKind::PACKAGE => {
+                        Span::styled("adopt? ", Style::default().fg(GOLD))
+                    }
+                    wukong_core::events::InboxKind::PACKAGE_GONE => {
+                        Span::styled("gone   ", Style::default().fg(Color::Red))
+                    }
+                    _ => Span::styled("track? ", Style::default().fg(GOLD)),
                 };
                 ListItem::new(Line::from(vec![tag, Span::raw(item.subject.clone())]))
             })
@@ -390,10 +402,40 @@ impl App {
     }
 
     fn render_packages(&self, f: &mut Frame, area: Rect) {
-        f.render_widget(
-            Paragraph::new("\n  Package governance lands in v0.2.\n  Brew and other providers, tracked and adopted.")
+        if self.data.packages.is_empty() {
+            f.render_widget(
+                Paragraph::new(
+                    "\n  The manifest is empty.\n  From a shell:  wukong install <pkg>\n  Or take in what's here:  wukong pkg adopt-installed",
+                )
                 .style(Style::default().fg(Color::DarkGray)),
+                area,
+            );
+            return;
+        }
+        let items: Vec<ListItem> = self
+            .data
+            .packages
+            .iter()
+            .map(|p| {
+                let (mark, style) = if p.installed {
+                    (" ", Style::default())
+                } else {
+                    ("!", Style::default().fg(Color::Red))
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {mark} {:24}", p.name), style),
+                    Span::styled(p.provider.as_str(), Style::default().fg(Color::DarkGray)),
+                ]))
+            })
+            .collect();
+        let mut state = ListState::default();
+        state.select(Some(self.selected));
+        f.render_stateful_widget(
+            List::new(items)
+                .highlight_style(Style::default().bg(Color::Rgb(40, 36, 28)))
+                .highlight_symbol("▌"),
             area,
+            &mut state,
         );
     }
 
@@ -407,7 +449,15 @@ impl App {
             None => " connecting…".to_string(),
         };
         let hint = match self.tab {
-            Tab::Inbox => "a approve · r redact · i ignore · 1-4 tabs · q quit",
+            Tab::Inbox => match self.data.inbox.get(self.selected).map(|i| i.kind.as_str()) {
+                Some(wukong_core::events::InboxKind::PACKAGE) => {
+                    "a adopt · i never ask again · q quit"
+                }
+                Some(wukong_core::events::InboxKind::PACKAGE_GONE) => {
+                    "a drop from manifest · i keep · q quit"
+                }
+                _ => "a approve · r redact · i ignore · 1-4 tabs · q quit",
+            },
             _ => "j/k move · h/l tabs · R refresh · q quit",
         };
         let right = self.flash.clone().unwrap_or_else(|| hint.to_string());

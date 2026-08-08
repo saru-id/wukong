@@ -3,9 +3,10 @@
 //! request so a stale daemon refuses politely instead of misparsing.
 
 use crate::events::{Event, InboxItem, Resolution};
+use crate::pkg::Provider;
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
@@ -49,6 +50,24 @@ pub enum Request {
         path: Option<String>,
         force: bool,
     },
+    /// The CLI ran the provider (brew) itself; record the outcome in
+    /// the manifest. `remove` = it was uninstalled.
+    PkgRecord {
+        provider: Provider,
+        name: String,
+        remove: bool,
+    },
+    /// Manifest entries with their live state.
+    PkgList,
+    /// Permanent opt-out (or undo it with `unignore`).
+    PkgIgnore {
+        provider: Provider,
+        name: String,
+        unignore: bool,
+    },
+    /// Bulk-adopt everything currently installed on request (formulae
+    /// and casks; apps stay offer-driven).
+    PkgAdoptInstalled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,9 +90,19 @@ pub enum Response {
     Events {
         events: Vec<Event>,
     },
+    Packages {
+        entries: Vec<PkgEntry>,
+    },
     Error {
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PkgEntry {
+    pub provider: Provider,
+    pub name: String,
+    pub installed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

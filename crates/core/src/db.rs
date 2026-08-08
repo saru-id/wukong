@@ -57,6 +57,11 @@ impl Db {
                 action      TEXT NOT NULL,
                 created_ts  TEXT NOT NULL,
                 PRIMARY KEY (path, fingerprint)
+            );
+            CREATE TABLE IF NOT EXISTS pkg_state (
+                provider TEXT NOT NULL,
+                name     TEXT NOT NULL,
+                PRIMARY KEY (provider, name)
             );",
         )?;
         // Additive migration: the meta column (finding fingerprints as
@@ -178,6 +183,50 @@ impl Db {
             .prepare("SELECT fingerprint, action FROM allowances WHERE path = ?1")?;
         let rows = stmt.query_map(params![path], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    // ---- Package state -------------------------------------------------
+    // The last ACKNOWLEDGED set of installed packages per provider.
+    // Reconcile compares reality against this to fire offers only on
+    // transitions; resolving/recording updates it.
+
+    pub fn pkg_state(&self, provider: &str) -> Result<Vec<String>, DbError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name FROM pkg_state WHERE provider = ?1 ORDER BY name")?;
+        let rows = stmt.query_map(params![provider], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn pkg_state_add(&self, provider: &str, name: &str) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO pkg_state (provider, name) VALUES (?1, ?2)",
+            params![provider, name],
+        )?;
+        Ok(())
+    }
+
+    pub fn pkg_state_remove(&self, provider: &str, name: &str) -> Result<(), DbError> {
+        self.conn.execute(
+            "DELETE FROM pkg_state WHERE provider = ?1 AND name = ?2",
+            params![provider, name],
+        )?;
+        Ok(())
+    }
+
+    /// Resolve any open inbox item with this kind and subject — used
+    /// when an explicit CLI action supersedes a pending offer.
+    pub fn inbox_resolve_open(
+        &self,
+        kind: &str,
+        subject: &str,
+        resolution: Resolution,
+    ) -> Result<bool, DbError> {
+        Ok(self.conn.execute(
+            "UPDATE inbox SET resolved = 1, resolution = ?3, resolved_ts = ?4
+             WHERE kind = ?1 AND subject = ?2 AND resolved = 0",
+            params![kind, subject, resolution.as_str(), now()],
+        )? > 0)
     }
 
     // ---- Inbox ---------------------------------------------------------

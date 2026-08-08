@@ -6,6 +6,7 @@
 mod client;
 mod init;
 mod launchd;
+mod pkg_cli;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -27,6 +28,27 @@ struct Cli {
 enum Command {
     /// Set up wukong on this machine (config, store, launchd agent).
     Init,
+    /// Install via brew and remember it in the manifest.
+    Install {
+        name: String,
+        /// Install as a cask (GUI app).
+        #[arg(long)]
+        cask: bool,
+        /// Install without recording ("don't track this one").
+        #[arg(long)]
+        no_track: bool,
+    },
+    /// Uninstall via brew and drop it from the manifest.
+    Rm {
+        name: String,
+        #[arg(long)]
+        cask: bool,
+    },
+    /// Package manifest: list, sync, adopt, ignore.
+    Pkg {
+        #[command(subcommand)]
+        action: PkgAction,
+    },
     /// Start tracking a file — its changes commit automatically.
     Track { path: String },
     /// Stop tracking a file.
@@ -62,6 +84,36 @@ enum Command {
     Doctor,
 }
 
+#[derive(Subcommand)]
+pub enum PkgAction {
+    /// Manifest entries and whether each is actually installed.
+    List,
+    /// Install everything in the manifest that's missing.
+    Sync {
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Bulk-adopt everything brew currently has on request.
+    AdoptInstalled,
+    /// Never offer this package again.
+    Ignore {
+        name: String,
+        #[arg(long)]
+        cask: bool,
+        #[arg(long)]
+        app: bool,
+    },
+    /// Allow a previously ignored package to be offered again.
+    Unignore {
+        name: String,
+        #[arg(long)]
+        cask: bool,
+        #[arg(long)]
+        app: bool,
+    },
+}
+
 #[derive(Subcommand, Clone, Copy)]
 pub enum DaemonAction {
     Start,
@@ -79,6 +131,19 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         None => tui::run(),
         Some(Command::Init) => init::run(),
+        Some(Command::Install {
+            name,
+            cask,
+            no_track,
+        }) => pkg_cli::install(&name, cask, no_track),
+        Some(Command::Rm { name, cask }) => pkg_cli::rm(&name, cask),
+        Some(Command::Pkg { action }) => match action {
+            PkgAction::List => pkg_cli::list(),
+            PkgAction::Sync { yes } => pkg_cli::sync(yes),
+            PkgAction::AdoptInstalled => pkg_cli::adopt_installed(),
+            PkgAction::Ignore { name, cask, app } => pkg_cli::ignore(&name, cask, app, false),
+            PkgAction::Unignore { name, cask, app } => pkg_cli::ignore(&name, cask, app, true),
+        },
         Some(Command::Track { path }) => say(Request::Track { path }),
         Some(Command::Untrack { path }) => say(Request::Untrack { path }),
         Some(Command::Status) => status(),
@@ -93,7 +158,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Fire a request whose success is just a message.
-fn say(req: Request) -> anyhow::Result<()> {
+pub fn say(req: Request) -> anyhow::Result<()> {
     match client::call(req)? {
         Response::Ok { message } => {
             println!("{message}");

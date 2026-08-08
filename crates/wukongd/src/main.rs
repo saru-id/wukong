@@ -118,6 +118,9 @@ async fn main() -> anyhow::Result<()> {
 
     let notify_on = engine.config.notifications;
 
+    // Catch anything installed or changed while the daemon was down.
+    engine.reconcile();
+
     // The one loop that owns the engine.
     while let Some(msg) = rx.recv().await {
         match msg {

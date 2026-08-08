@@ -1408,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "wukong"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1419,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "wukong-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "regex",
  "rusqlite",
@@ -1434,7 +1434,7 @@ dependencies = [
 
 [[package]]
 name = "wukongd"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "notify",

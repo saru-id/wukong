@@ -25,6 +25,11 @@ pub mod kind {
     pub const PUSH_FAILED: &str = "push-failed";
     pub const RESTORED: &str = "restored";
     pub const HELD: &str = "held";
+    pub const PKG_INSTALLED: &str = "pkg-installed";
+    pub const PKG_REMOVED: &str = "pkg-removed";
+    pub const PKG_ADOPTED: &str = "pkg-adopted";
+    pub const PKG_IGNORED: &str = "pkg-ignored";
+    pub const PKG_GONE: &str = "pkg-gone";
 }
 
 pub use kind as EventKind;
@@ -51,6 +56,12 @@ pub mod inbox_kind {
     pub const QUARANTINE: &str = "quarantine";
     /// An untracked sentinel changed — track it?
     pub const SENTINEL: &str = "sentinel";
+    /// A package appeared outside wukong — adopt it? (For package
+    /// items, `ignore` is PERMANENT: it lands on the manifest's
+    /// ignore list and the package is never offered again.)
+    pub const PACKAGE: &str = "package";
+    /// A manifest package vanished outside wukong — drop it?
+    pub const PACKAGE_GONE: &str = "package-gone";
 }
 
 pub use inbox_kind as InboxKind;

@@ -8,18 +8,23 @@
 //! filesystem event and consults only in-memory sets — the tracked
 //! roster and the precomputed sentinel lists — never the database.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use wukong_core::db::InboxOutcome;
 use wukong_core::events::{EventKind, InboxKind, Resolution};
 use wukong_core::gate::{self, Finding, GateVerdict};
-use wukong_core::ipc::{Request, Response, StatusInfo, TrackedFile};
+use wukong_core::ipc::{PkgEntry, Request, Response, StatusInfo, TrackedFile};
+use wukong_core::pkg::{self, Manifest, PkgRoots, Provider};
 use wukong_core::{Config, Db, Store, paths};
 
 /// Inbox bodies are evidence, not archives.
 const BODY_MAX_LINES: usize = 300;
 const BODY_MAX_BYTES: usize = 16 * 1024;
+
+/// Pseudo-provider row marking that the first package reconcile has
+/// run; real providers are "formula"/"cask"/"app", so no collision.
+const BASELINE_MARKER: &str = "__meta__";
 
 pub struct Engine {
     pub config: Config,
@@ -40,6 +45,12 @@ pub struct Engine {
     sentinel_files: Vec<PathBuf>,
     sentinel_dirs: Vec<PathBuf>,
     excludes: Vec<PathBuf>,
+    /// Package governance: the synced manifest, where the detectors
+    /// look, and a debounce mark for the next reconcile.
+    manifest: Manifest,
+    pkg_roots: PkgRoots,
+    pkg_watch: Vec<PathBuf>,
+    pkg_dirty: Option<Instant>,
 }
 
 impl Engine {
@@ -65,6 +76,21 @@ impl Engine {
             }
         }
         let excludes = config.exclude_paths();
+        let manifest = Manifest::load(store.dir());
+        let pkg_roots = if config.packages.enabled {
+            config.pkg_roots()
+        } else {
+            PkgRoots {
+                cellar: None,
+                caskroom: None,
+                applications: None,
+            }
+        };
+        let pkg_watch = pkg_roots
+            .watch_roots()
+            .iter()
+            .map(|r| paths::canonicalize_lenient(r))
+            .collect();
         Ok(Self {
             config,
             db,
@@ -80,6 +106,10 @@ impl Engine {
             sentinel_files,
             sentinel_dirs,
             excludes,
+            manifest,
+            pkg_roots,
+            pkg_watch,
+            pkg_dirty: None,
         })
     }
 
@@ -105,6 +135,9 @@ impl Engine {
                 roots.entry(parent.to_path_buf()).or_insert(false);
             }
         }
+        for root in &self.pkg_watch {
+            roots.entry(root.clone()).or_insert(false);
+        }
         let mut out: Vec<(PathBuf, bool)> = roots.into_iter().collect();
         out.sort();
         out
@@ -126,6 +159,16 @@ impl Engine {
     /// waits for the debounce to settle in `tick`.
     pub fn touch(&mut self, path: PathBuf) {
         if path.starts_with(self.store.dir()) || is_noise(&path) {
+            return;
+        }
+        // Package-root churn marks a reconcile instead of a per-path
+        // settle — packages are reconciled as a set, not file by file.
+        if self
+            .pkg_watch
+            .iter()
+            .any(|r| path.parent() == Some(r.as_path()) || path == *r)
+        {
+            self.pkg_dirty = Some(Instant::now());
             return;
         }
         let relevant = self.tracked_live.contains(&path)
@@ -174,6 +217,9 @@ impl Engine {
         for path in ready {
             self.pending.remove(&path);
             new_inbox += self.settle(&path);
+        }
+        if self.pkg_dirty.is_some_and(|t| t.elapsed() >= debounce) {
+            new_inbox += self.reconcile();
         }
         new_inbox
     }
@@ -327,6 +373,238 @@ impl Engine {
         usize::from(outcome == InboxOutcome::New)
     }
 
+    // ---- Package governance --------------------------------------------
+
+    /// Compare reality against the last acknowledged state and offer
+    /// only the TRANSITIONS: a newly appeared package that isn't in
+    /// the manifest or on the ignore list becomes an adoption offer; a
+    /// vanished manifest member becomes a removal offer. The first run
+    /// ever baselines silently — a machine full of pre-wukong installs
+    /// must not open fifty inbox items (bulk adoption is an explicit
+    /// CLI verb). Returns new inbox items.
+    pub fn reconcile(&mut self) -> usize {
+        self.pkg_dirty = None;
+        if !self.config.packages.enabled {
+            return 0;
+        }
+        let current = self.detect_installed();
+        // An explicit marker, not row-count inference: a machine whose
+        // very first reconcile finds zero packages must still count as
+        // baselined afterwards.
+        let baseline = self
+            .db
+            .pkg_state(BASELINE_MARKER)
+            .map(|rows| rows.is_empty())
+            .unwrap_or(true);
+        if baseline {
+            let _ = self.db.pkg_state_add(BASELINE_MARKER, "done");
+        }
+        let mut new_items = 0;
+        for (provider, installed) in current {
+            let prev: BTreeSet<String> = self
+                .db
+                .pkg_state(provider.as_str())
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            for name in installed.difference(&prev) {
+                let _ = self.db.pkg_state_add(provider.as_str(), name);
+                if baseline
+                    || self.manifest.contains(provider, name)
+                    || self.manifest.ignored(provider, name)
+                {
+                    continue;
+                }
+                new_items += self.offer_package(provider, name);
+            }
+            for name in prev.difference(&installed) {
+                let _ = self.db.pkg_state_remove(provider.as_str(), name);
+                if baseline || !self.manifest.contains(provider, name) {
+                    continue;
+                }
+                new_items += self.offer_package_gone(provider, name);
+            }
+        }
+        new_items
+    }
+
+    fn detect_installed(&self) -> Vec<(Provider, BTreeSet<String>)> {
+        let mut out = Vec::new();
+        if let Some(cellar) = &self.pkg_roots.cellar {
+            out.push((Provider::Formula, pkg::installed_formulae(cellar)));
+        }
+        if let Some(caskroom) = &self.pkg_roots.caskroom {
+            out.push((Provider::Cask, pkg::installed_casks(caskroom)));
+        }
+        if let Some(apps) = &self.pkg_roots.applications {
+            out.push((Provider::App, pkg::installed_apps(apps)));
+        }
+        out
+    }
+
+    fn offer_package(&mut self, provider: Provider, name: &str) -> usize {
+        let subject = pkg::subject(provider, name);
+        let body = format!(
+            "{name} ({}) was installed outside wukong.\n\n\
+             approve — add it to the manifest; wukong remembers it\n\
+             ignore  — never ask about {name} again",
+            provider.as_str()
+        );
+        let outcome = self
+            .db
+            .inbox_add(
+                InboxKind::PACKAGE,
+                &subject,
+                "installed outside wukong — adopt it?",
+                &body,
+                "",
+            )
+            .unwrap_or(InboxOutcome::Refreshed);
+        usize::from(outcome == InboxOutcome::New)
+    }
+
+    fn offer_package_gone(&mut self, provider: Provider, name: &str) -> usize {
+        let subject = pkg::subject(provider, name);
+        let body = format!(
+            "{name} ({}) is in the manifest but no longer installed.\n\n\
+             approve — drop it from the manifest\n\
+             ignore  — keep it (pkg sync can reinstall it)",
+            provider.as_str()
+        );
+        let outcome = self
+            .db
+            .inbox_add(
+                InboxKind::PACKAGE_GONE,
+                &subject,
+                "uninstalled outside wukong — drop it?",
+                &body,
+                "",
+            )
+            .unwrap_or(InboxOutcome::Refreshed);
+        let _ = self.db.record(EventKind::PKG_GONE, &subject, "");
+        usize::from(outcome == InboxOutcome::New)
+    }
+
+    /// Persist the manifest into the store and commit it under the
+    /// packages banner.
+    fn commit_manifest(&mut self, summary: &str) {
+        let _ = self.manifest.save(self.store.dir());
+        if let Ok(Some(sha)) = self.store.commit(
+            Path::new(pkg::MANIFEST_REL),
+            &format!("packages: {summary}"),
+        ) {
+            let _ = self.db.record(EventKind::COMMITTED, "packages", summary);
+            self.last_commit = Some(sha);
+            self.dirty = true;
+        }
+    }
+
+    fn pkg_record(&mut self, provider: Provider, name: &str, remove: bool) -> Response {
+        let subject = pkg::subject(provider, name);
+        if remove {
+            self.manifest.remove(provider, name);
+            let _ = self.db.pkg_state_remove(provider.as_str(), name);
+            let _ = self.db.record(EventKind::PKG_REMOVED, &subject, "");
+            // An explicit removal supersedes any pending gone-offer.
+            let _ =
+                self.db
+                    .inbox_resolve_open(InboxKind::PACKAGE_GONE, &subject, Resolution::Approve);
+            self.commit_manifest(&format!("-{name}"));
+            Response::Ok {
+                message: format!("{name} removed from the manifest"),
+            }
+        } else {
+            self.manifest.add(provider, name);
+            let _ = self.db.pkg_state_add(provider.as_str(), name);
+            let _ = self.db.record(EventKind::PKG_INSTALLED, &subject, "");
+            // An explicit install supersedes any pending adopt-offer.
+            let _ = self
+                .db
+                .inbox_resolve_open(InboxKind::PACKAGE, &subject, Resolution::Approve);
+            self.commit_manifest(&format!("+{name}"));
+            Response::Ok {
+                message: format!("{name} recorded in the manifest"),
+            }
+        }
+    }
+
+    fn pkg_list(&self) -> Response {
+        let installed: HashMap<Provider, BTreeSet<String>> =
+            self.detect_installed().into_iter().collect();
+        Response::Packages {
+            entries: self
+                .manifest
+                .entries()
+                .into_iter()
+                .map(|(provider, name)| PkgEntry {
+                    installed: installed
+                        .get(&provider)
+                        .is_some_and(|set| set.contains(&name)),
+                    provider,
+                    name,
+                })
+                .collect(),
+        }
+    }
+
+    fn pkg_ignore(&mut self, provider: Provider, name: &str, unignore: bool) -> Response {
+        let subject = pkg::subject(provider, name);
+        if unignore {
+            if !self.manifest.remove_ignore(provider, name) {
+                return Response::Error {
+                    message: format!("{name} was not ignored"),
+                };
+            }
+            self.commit_manifest(&format!("unignore {name}"));
+            Response::Ok {
+                message: format!("{name} can be offered again"),
+            }
+        } else {
+            self.manifest.add_ignore(provider, name);
+            let _ = self.db.record(EventKind::PKG_IGNORED, &subject, "");
+            let _ = self
+                .db
+                .inbox_resolve_open(InboxKind::PACKAGE, &subject, Resolution::Ignore);
+            self.commit_manifest(&format!("ignore {name}"));
+            Response::Ok {
+                message: format!("{name} will never be offered again"),
+            }
+        }
+    }
+
+    /// Bulk onboarding: everything currently installed on request goes
+    /// straight into the manifest. Formulae and casks only — a used
+    /// Mac's /Applications is too noisy to adopt wholesale; apps stay
+    /// offer-driven.
+    fn pkg_adopt_installed(&mut self) -> Response {
+        let mut adopted = 0;
+        for (provider, installed) in self.detect_installed() {
+            if provider == Provider::App {
+                continue;
+            }
+            for name in installed {
+                let _ = self.db.pkg_state_add(provider.as_str(), &name);
+                if !self.manifest.contains(provider, &name)
+                    && !self.manifest.ignored(provider, &name)
+                    && self.manifest.add(provider, &name)
+                {
+                    adopted += 1;
+                }
+            }
+        }
+        if adopted > 0 {
+            let _ = self.db.record(
+                EventKind::PKG_ADOPTED,
+                "bulk",
+                &format!("{adopted} package(s)"),
+            );
+            self.commit_manifest(&format!("adopt {adopted} installed"));
+        }
+        Response::Ok {
+            message: format!("adopted {adopted} package(s)"),
+        }
+    }
+
     fn after_commit(&mut self, rel: &str, sha: &str, summary: &str) {
         let _ = self.db.set_hash(rel, sha);
         let _ = self.db.record(EventKind::COMMITTED, rel, summary);
@@ -393,6 +671,18 @@ impl Engine {
                 Err(e) => err(e),
             },
             Request::Restore { path, force } => self.restore(path.as_deref(), force),
+            Request::PkgRecord {
+                provider,
+                name,
+                remove,
+            } => self.pkg_record(provider, &name, remove),
+            Request::PkgList => self.pkg_list(),
+            Request::PkgIgnore {
+                provider,
+                name,
+                unignore,
+            } => self.pkg_ignore(provider, &name, unignore),
+            Request::PkgAdoptInstalled => self.pkg_adopt_installed(),
             // Push is orchestrated by the daemon loop so it can run off
             // this thread; reaching here means a wiring bug.
             Request::PushNow => Response::Error {
@@ -517,6 +807,12 @@ impl Engine {
         };
         let live = paths::from_store_rel(Path::new(&item.subject));
 
+        // Package items: redact has no meaning, and the actions edit
+        // the manifest rather than the mirror.
+        if item.kind == InboxKind::PACKAGE || item.kind == InboxKind::PACKAGE_GONE {
+            return self.resolve_package(id, &item.kind, &item.subject, resolution);
+        }
+
         // Guard before anything is resolved: approving a sentinel offer
         // for a forbidden-named file is refused outright (offers skip
         // them now, but items may predate that rule).
@@ -568,6 +864,61 @@ impl Engine {
         }
     }
 
+    /// Package inbox items. Approve on an offer adopts; ignore is the
+    /// PERMANENT opt-out ("hey, don't track this program"). Approve on
+    /// a gone-item drops the manifest entry; ignore keeps it so
+    /// `pkg sync` can bring it back.
+    fn resolve_package(
+        &mut self,
+        id: i64,
+        kind: &str,
+        subject: &str,
+        resolution: Resolution,
+    ) -> Response {
+        let Some((provider, name)) = pkg::parse_subject(subject) else {
+            return Response::Error {
+                message: format!("malformed package subject {subject}"),
+            };
+        };
+        if resolution == Resolution::Redact {
+            return Response::Error {
+                message: "redact does not apply to packages — approve or ignore".to_string(),
+            };
+        }
+        let name = name.to_string();
+        let _ = self.db.inbox_resolve(id, resolution);
+        let _ = self
+            .db
+            .record(EventKind::RESOLVED, subject, resolution.as_str());
+        match (kind, resolution) {
+            (InboxKind::PACKAGE, Resolution::Approve) => {
+                self.manifest.add(provider, &name);
+                let _ = self
+                    .db
+                    .record(EventKind::PKG_ADOPTED, subject, "from inbox");
+                self.commit_manifest(&format!("+{name}"));
+            }
+            (InboxKind::PACKAGE, Resolution::Ignore) => {
+                self.manifest.add_ignore(provider, &name);
+                let _ = self
+                    .db
+                    .record(EventKind::PKG_IGNORED, subject, "from inbox");
+                self.commit_manifest(&format!("ignore {name}"));
+            }
+            (InboxKind::PACKAGE_GONE, Resolution::Approve) => {
+                self.manifest.remove(provider, &name);
+                let _ = self
+                    .db
+                    .record(EventKind::PKG_REMOVED, subject, "from inbox");
+                self.commit_manifest(&format!("-{name}"));
+            }
+            _ => {} // gone + ignore: keep the manifest entry
+        }
+        Response::Ok {
+            message: format!("resolved {subject} ({})", resolution.as_str()),
+        }
+    }
+
     /// Copy stored files back to their live locations and track them —
     /// the new-machine bootstrap. Existing files that differ are
     /// skipped unless forced.
@@ -586,6 +937,11 @@ impl Engine {
         }
         let (mut restored, mut skipped) = (0usize, Vec::new());
         for rel in rels {
+            // wukong's own artifacts (the manifest) are store state,
+            // not live files — never "restore" them into $HOME.
+            if rel.starts_with("__wukong__") {
+                continue;
+            }
             let rel_str = rel.to_string_lossy().into_owned();
             let stored = match std::fs::read(self.store.dir().join(&rel)) {
                 Ok(b) => b,
@@ -889,6 +1245,159 @@ mod tests {
         std::fs::write(&env, "SECRET=x").unwrap();
         let resp = rig.engine.track(env.to_str().unwrap());
         assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
+    }
+
+    /// A rig with package roots pointed at fake trees in the tempdir.
+    fn pkg_rig() -> Rig {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        for dir in ["brew/Cellar", "brew/Caskroom", "Applications"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let mut config = Config {
+            machine: "testbox".to_string(),
+            debounce_secs: 0,
+            ..Config::default()
+        };
+        config.packages.brew_prefix = root.join("brew").to_string_lossy().into_owned();
+        config.packages.applications_dir = root.join("Applications").to_string_lossy().into_owned();
+        let engine = Engine::new(config, &root.join("wukong.db"), &root.join("store")).unwrap();
+        Rig {
+            engine,
+            home: root.clone(),
+            _guard: tmp,
+        }
+    }
+
+    fn brew_install(rig: &Rig, name: &str, on_request: bool) {
+        let vdir = rig.home.join("brew/Cellar").join(name).join("1.0");
+        std::fs::create_dir_all(&vdir).unwrap();
+        std::fs::write(
+            vdir.join("INSTALL_RECEIPT.json"),
+            format!("{{\"installed_on_request\":{on_request}}}"),
+        )
+        .unwrap();
+    }
+
+    fn brew_uninstall(rig: &Rig, name: &str) {
+        std::fs::remove_dir_all(rig.home.join("brew/Cellar").join(name)).unwrap();
+    }
+
+    #[test]
+    fn first_reconcile_baselines_silently() {
+        let mut rig = pkg_rig();
+        brew_install(&rig, "jq", true);
+        std::fs::create_dir_all(rig.home.join("Applications/Raycast.app")).unwrap();
+        assert_eq!(rig.engine.reconcile(), 0);
+        assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
+        // …but the state is acknowledged, so nothing re-offers later.
+        assert_eq!(rig.engine.reconcile(), 0);
+    }
+
+    #[test]
+    fn new_install_offers_dependency_does_not() {
+        let mut rig = pkg_rig();
+        rig.engine.reconcile(); // baseline (empty)
+        brew_install(&rig, "ripgrep", true);
+        brew_install(&rig, "oniguruma", false); // dependency
+        assert_eq!(rig.engine.reconcile(), 1);
+        let items = rig.engine.db.inbox_open().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].subject, "formula:ripgrep");
+        // Offer fires once per transition, not per reconcile.
+        assert_eq!(rig.engine.reconcile(), 0);
+    }
+
+    #[test]
+    fn adopt_and_permanent_ignore() {
+        let mut rig = pkg_rig();
+        rig.engine.reconcile();
+        brew_install(&rig, "ripgrep", true);
+        brew_install(&rig, "htop", true);
+        rig.engine.reconcile();
+        let items = rig.engine.db.inbox_open().unwrap();
+        let rg = items
+            .iter()
+            .find(|i| i.subject == "formula:ripgrep")
+            .unwrap();
+        let ht = items.iter().find(|i| i.subject == "formula:htop").unwrap();
+
+        rig.engine.resolve(rg.id, Resolution::Approve);
+        assert!(rig.engine.manifest.contains(Provider::Formula, "ripgrep"));
+
+        rig.engine.resolve(ht.id, Resolution::Ignore);
+        assert!(rig.engine.manifest.ignored(Provider::Formula, "htop"));
+        // The permanent part: uninstall and reinstall → no new offer.
+        brew_uninstall(&rig, "htop");
+        rig.engine.reconcile();
+        brew_install(&rig, "htop", true);
+        assert_eq!(rig.engine.reconcile(), 0);
+        assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
+        // And the manifest survives in the store, committed.
+        let stored = Manifest::load(rig.engine.store.dir());
+        assert!(stored.contains(Provider::Formula, "ripgrep"));
+        assert!(stored.ignored(Provider::Formula, "htop"));
+    }
+
+    #[test]
+    fn manifest_member_gone_offers_removal() {
+        let mut rig = pkg_rig();
+        rig.engine.reconcile();
+        brew_install(&rig, "jq", true);
+        rig.engine.pkg_record(Provider::Formula, "jq", false);
+        rig.engine.reconcile();
+        assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
+
+        brew_uninstall(&rig, "jq");
+        assert_eq!(rig.engine.reconcile(), 1);
+        let item = &rig.engine.db.inbox_open().unwrap()[0];
+        assert_eq!(item.kind, InboxKind::PACKAGE_GONE);
+        rig.engine.resolve(item.id, Resolution::Approve);
+        assert!(!rig.engine.manifest.contains(Provider::Formula, "jq"));
+    }
+
+    #[test]
+    fn pkg_record_supersedes_open_offer() {
+        let mut rig = pkg_rig();
+        rig.engine.reconcile();
+        brew_install(&rig, "fd", true);
+        rig.engine.reconcile();
+        assert_eq!(rig.engine.db.inbox_count().unwrap(), 1);
+        // The user runs `wukong install fd` after brew already had it.
+        rig.engine.pkg_record(Provider::Formula, "fd", false);
+        assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
+        assert!(rig.engine.manifest.contains(Provider::Formula, "fd"));
+    }
+
+    #[test]
+    fn bulk_adopt_takes_brew_not_apps() {
+        let mut rig = pkg_rig();
+        brew_install(&rig, "jq", true);
+        brew_install(&rig, "oniguruma", false);
+        std::fs::create_dir_all(rig.home.join("brew/Caskroom/raycast")).unwrap();
+        std::fs::create_dir_all(rig.home.join("Applications/Safari.app")).unwrap();
+        let Response::Ok { message } = rig.engine.pkg_adopt_installed() else {
+            panic!("adopt failed");
+        };
+        assert!(message.contains("adopted 2"), "{message}");
+        assert!(rig.engine.manifest.contains(Provider::Formula, "jq"));
+        assert!(rig.engine.manifest.contains(Provider::Cask, "raycast"));
+        assert!(!rig.engine.manifest.contains(Provider::App, "Safari"));
+    }
+
+    #[test]
+    fn restore_skips_wukong_namespace() {
+        let mut rig = pkg_rig();
+        rig.engine.pkg_record(Provider::Formula, "jq", false);
+        let resp = rig.engine.restore(None, false);
+        let Response::Ok { message } = resp else {
+            panic!("restore failed");
+        };
+        assert!(message.contains("restored 0"), "{message}");
+        assert!(!rig.home.join("home/__wukong__").exists());
+        assert!(!paths::home().join("__wukong__").exists());
     }
 
     #[test]

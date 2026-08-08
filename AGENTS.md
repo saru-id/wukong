@@ -62,6 +62,20 @@ much later phase.
 - **One daemon.** Startup connects to the socket first and exits if
   someone answers. Don't remove that guard: launchd KeepAlive plus a
   manual start would otherwise double-commit.
+- **Packages reconcile as a set, on transitions only.** `pkg_state` in
+  the DB is the last acknowledged reality; offers fire only when it
+  and the filesystem disagree (new on-request install not in
+  manifest/ignore, or manifest member gone). The first reconcile ever
+  baselines silently behind an explicit `__meta__` marker row — a
+  pre-wukong machine must not open fifty inbox items. Detection reads
+  Cellar receipts (`installed_on_request`), Caskroom dirs, and .app
+  bundles — never shell out to brew in the daemon.
+- **The manifest is store state, not a live file.** It lives at
+  `__wukong__/packages.toml` inside the store repo; `restore` must
+  skip the `__wukong__` namespace. For package inbox items, `ignore`
+  is PERMANENT (manifest ignore list); redact is invalid. The CLI runs
+  brew client-side and reports via PkgRecord — which also supersedes
+  any pending offer for the same package.
 
 ## Verification
 

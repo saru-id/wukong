@@ -26,6 +26,29 @@ pub struct Config {
     /// Paths under sentinel roots that are never offered for tracking
     /// (wukong's own config, cache-like churn).
     pub exclude: Vec<String>,
+    /// Package governance knobs.
+    pub packages: Packages,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Packages {
+    /// Watch brew and /Applications, offer adoptions in the inbox.
+    pub enabled: bool,
+    /// Override the auto-detected Homebrew prefix (tests, odd setups).
+    pub brew_prefix: String,
+    /// Override /Applications (tests).
+    pub applications_dir: String,
+}
+
+impl Default for Packages {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            brew_prefix: String::new(),
+            applications_dir: String::new(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -38,6 +61,7 @@ impl Default for Config {
             sentinels: default_sentinels(),
             notifications: true,
             exclude: vec!["~/.config/wukong".to_string()],
+            packages: Packages::default(),
         }
     }
 }
@@ -98,6 +122,21 @@ impl Config {
     /// Exclude entries, canonical like the sentinels.
     pub fn exclude_paths(&self) -> Vec<PathBuf> {
         expand_all(&self.exclude)
+    }
+
+    /// Detector roots honoring config overrides.
+    pub fn pkg_roots(&self) -> crate::pkg::PkgRoots {
+        let opt = |s: &str| {
+            if s.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(s))
+            }
+        };
+        crate::pkg::PkgRoots::detect(
+            opt(&self.packages.brew_prefix).as_deref(),
+            opt(&self.packages.applications_dir).as_deref(),
+        )
     }
 }
 

@@ -10,7 +10,7 @@ drifts unnoticed.
 Built for one person, written for anyone: XDG paths throughout, no
 hardcoded machine names, and a `wukong init` that works on any Mac.
 
-## What it does today (v0.1 — the dotfiles governor)
+## What it does today
 
 - **Never forget to commit.** Track a file; every settled change
   commits to a private mirror repo on this machine's branch, with a
@@ -36,6 +36,27 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
   `a`/`r`/`i` to resolve); `wukong status` prints the count; a macOS
   notification fires only on new items.
 
+### Packages (v0.2)
+
+- **Install through wukong, never lose track.** `wukong install jq`
+  runs brew (its output streams through untouched) and records the
+  package in a manifest that lives in the store — committed, pushed,
+  and historied like every dotfile. `wukong rm` is the reverse.
+  `--no-track` opts a single install out.
+- **Nothing escapes notice.** The daemon watches the brew Cellar and
+  Caskroom and /Applications. Install something directly — `brew
+  install`, a downloaded .app — and it lands in the inbox as "adopt
+  it?". Approve to remember it; ignore to never be asked about that
+  package again. Dependencies never surface: detection reads brew's
+  own receipts and only what you asked for counts.
+- **Symmetry on the way out.** Uninstall a manifest package behind
+  wukong's back and the inbox asks whether to drop it or keep it for
+  reinstall.
+- **The new-machine answer.** `wukong pkg sync` installs everything in
+  the manifest that's missing (and prints the checklist of apps it can
+  remember but not install). `wukong pkg adopt-installed` bulk-imports
+  an existing machine's brew world on day one.
+
 ## Layout
 
 - `crates/core` — the domain: config, XDG paths, the mirror store, the
@@ -44,9 +65,10 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
 - `crates/wukongd` — the daemon: a tokio event loop over an FSEvents
   watcher, debounce and push timers, and a unix-socket server. Runs as
   a launchd LaunchAgent, idle-cheap.
-- `crates/wukong` — the CLI and ratatui TUI: `init`, `track`,
-  `untrack`, `status`, `files`, `inbox`, `resolve`, `push`, `daemon`,
-  `doctor`. Bare `wukong` opens the dashboard.
+- `crates/wukong` — the CLI and ratatui TUI: `init`, `install`, `rm`,
+  `pkg`, `track`, `untrack`, `status`, `files`, `inbox`, `resolve`,
+  `push`, `restore`, `daemon`, `doctor`. Bare `wukong` opens the
+  dashboard.
 
 ## Getting started
 
@@ -66,10 +88,8 @@ database in `~/.local/share/wukong`, the socket in `~/.local/state`.
 
 ## Roadmap
 
-- v0.2 — package governance: `wukong install/rm` wrapping brew and
-  friends, passive adoption of anything installed directly, per-provider
-  tracking with opt-out.
-- v0.3 — settings governance, carried forward from the catalog work.
+- v0.3 — settings governance, carried forward from the catalog work;
+  more package providers (mas, npm/cargo/pipx globals).
 - Later — the GUI, as a third client of the same daemon socket.
 
 ## Development
