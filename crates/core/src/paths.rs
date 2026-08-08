@@ -103,7 +103,7 @@ pub fn config_dir() -> PathBuf {
 /// `~/.local/share/wukong` — the store repo and the database.
 #[must_use]
 pub fn data_dir() -> PathBuf {
-    xdg("XDG_DATA_HOME", ".local/share")
+    DATA_DIR.clone()
 }
 
 /// `~/.local/state/wukong` — the daemon socket and pid file.
