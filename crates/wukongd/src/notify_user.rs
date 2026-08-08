@@ -9,9 +9,13 @@ pub fn inbox(new_items: usize) {
         "display notification {} with title \"wukong\"",
         applescript_quote(&body)
     );
-    let _ = std::process::Command::new("osascript")
-        .args(["-e", &script])
-        .spawn();
+    // A reaping thread, not a bare spawn — bare spawn leaks one zombie
+    // process per notification until the daemon exits.
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .status();
+    });
 }
 
 fn applescript_quote(s: &str) -> String {
