@@ -15,12 +15,19 @@ use wukong_core::db::InboxOutcome;
 use wukong_core::events::{EventKind, InboxKind, Resolution};
 use wukong_core::gate::{self, Finding, GateVerdict};
 use wukong_core::ipc::{Request, Response, StatusInfo, TrackedFile};
-use wukong_core::pkg::{Manifest, PkgRoots};
+use wukong_core::pkg::{Manifest, PkgRoots, Provider};
 use wukong_core::{Config, Db, Store, paths};
 
 /// Inbox bodies are evidence, not archives.
 const BODY_MAX_LINES: usize = 300;
 const BODY_MAX_BYTES: usize = 16 * 1024;
+/// A tracked file larger than this is skipped with a logged error —
+/// the governor is for dotfiles, not disk images.
+const MAX_TRACKED_BYTES: usize = 10 * 1024 * 1024;
+/// Sentinel offers never read files larger than this.
+const MAX_SENTINEL_BYTES: u64 = 1024 * 1024;
+/// Cap on fingerprints stored per inbox item.
+const MAX_META_FINGERPRINTS: usize = 100;
 
 mod packages;
 
@@ -38,9 +45,20 @@ pub struct Engine {
     last_push: Option<String>,
     dirty: bool,
     push_in_flight: bool,
-    /// Directories the loop should start watching — filled when a new
-    /// file is tracked, drained by main after each request.
-    watch_requests: Vec<PathBuf>,
+    /// Monotonic commit counter; `begin_push` snapshots it so a commit
+    /// landing during an in-flight push is never marked as pushed.
+    commits: u64,
+    push_snapshot: u64,
+    /// Cached `git rev-list` count so `status` doesn't fork git on
+    /// every TUI poll.
+    unpushed: usize,
+    /// True when the on-disk manifest exists but failed to parse —
+    /// saving over it would erase the real one, so saves are refused.
+    manifest_poisoned: bool,
+    /// (dir, recursive) watch roots the loop should start watching —
+    /// filled when files are tracked or a sentinel is promoted to a
+    /// directory, drained by main after each message batch.
+    watch_requests: Vec<(PathBuf, bool)>,
     /// Canonical live paths of tracked files: the hot-path roster.
     tracked_live: HashSet<PathBuf>,
     sentinel_files: Vec<PathBuf>,
@@ -52,6 +70,12 @@ pub struct Engine {
     pkg_roots: PkgRoots,
     pkg_watch: Vec<PathBuf>,
     pkg_dirty: Option<Instant>,
+    /// The reconcile's snapshot of what's installed — `pkg_list` serves
+    /// this instead of walking the Cellar per request.
+    pkg_installed: Vec<(Provider, std::collections::BTreeSet<String>)>,
+    /// When the Cellar first showed a formula dir without a receipt
+    /// (a pour in progress); bounds the re-arm loop.
+    pkg_unsettled_since: Option<Instant>,
 }
 
 impl Engine {
@@ -77,7 +101,13 @@ impl Engine {
             }
         }
         let excludes = config.exclude_paths();
-        let manifest = Manifest::load(store.dir());
+        let (manifest, manifest_poisoned) = match Manifest::load(store.dir()) {
+            Ok(m) => (m.unwrap_or_default(), false),
+            Err(e) => {
+                eprintln!("wukongd: {e} — package manifest is READ-ONLY until fixed");
+                (Manifest::default(), true)
+            }
+        };
         let pkg_roots = if config.packages.enabled {
             config.pkg_roots()
         } else {
@@ -92,7 +122,14 @@ impl Engine {
             .iter()
             .map(|r| paths::canonicalize_lenient(r))
             .collect();
+        // Unpushed commits can exist at startup (a push interval that
+        // never fired before shutdown); derive dirtiness from git, not
+        // from a fresh bool, or they'd sit local until the next edit.
+        let remote_configured = !config.remote.is_empty();
+        let unpushed = store.unpushed(remote_configured);
         Ok(Self {
+            dirty: remote_configured && unpushed > 0,
+            unpushed,
             config,
             db,
             store,
@@ -100,8 +137,10 @@ impl Engine {
             pending: HashMap::new(),
             last_commit: None,
             last_push: None,
-            dirty: false,
             push_in_flight: false,
+            commits: 0,
+            push_snapshot: 0,
+            manifest_poisoned,
             watch_requests: Vec::new(),
             tracked_live,
             sentinel_files,
@@ -111,6 +150,8 @@ impl Engine {
             pkg_roots,
             pkg_watch,
             pkg_dirty: None,
+            pkg_installed: Vec::new(),
+            pkg_unsettled_since: None,
         })
     }
 
@@ -144,14 +185,14 @@ impl Engine {
         out
     }
 
-    /// New watch roots requested since the last drain (non-recursive).
-    pub fn drain_watch_requests(&mut self) -> Vec<PathBuf> {
+    /// New watch roots requested since the last drain.
+    pub fn drain_watch_requests(&mut self) -> Vec<(PathBuf, bool)> {
         std::mem::take(&mut self.watch_requests)
     }
 
-    fn request_watch(&mut self, dir: &Path) {
-        if !self.watch_requests.iter().any(|d| d == dir) {
-            self.watch_requests.push(dir.to_path_buf());
+    fn request_watch(&mut self, dir: &Path, recursive: bool) {
+        if !self.watch_requests.iter().any(|(d, _)| d == dir) {
+            self.watch_requests.push((dir.to_path_buf(), recursive));
         }
     }
 
@@ -160,6 +201,17 @@ impl Engine {
     /// waits for the debounce to settle in `tick`.
     pub fn touch(&mut self, path: PathBuf) {
         if path.starts_with(self.store.dir()) || is_noise(&path) {
+            return;
+        }
+        // A sentinel classified as a file at startup (because it did
+        // not exist yet) may turn out to be a directory: promote it so
+        // its children are governed from now on.
+        if let Some(ix) = self.sentinel_files.iter().position(|f| f == &path)
+            && path.is_dir()
+        {
+            let dir = self.sentinel_files.swap_remove(ix);
+            self.request_watch(&dir, true);
+            self.sentinel_dirs.push(dir);
             return;
         }
         // Package-root churn marks a reconcile instead of a per-path
@@ -193,6 +245,8 @@ impl Engine {
         for path in all {
             self.pending.insert(path, now);
         }
+        // Lost events may include package transitions.
+        self.pkg_dirty = Some(now);
     }
 
     fn under_sentinel(&self, path: &Path) -> bool {
@@ -243,18 +297,34 @@ impl Engine {
     /// 4. paranoia: the to-be-stored content is re-scanned; anything
     ///    unexpected holds the commit rather than trusting the mask
     fn commit_tracked(&mut self, path: &Path, rel: &str) -> usize {
-        let Ok(bytes) = std::fs::read(path) else {
-            // Deleted: drop it from the mirror and commit the removal.
-            soft(self.store.remove(path));
-            let rel_path = paths::store_rel(path);
-            if let Ok(Some(sha)) = self.store.commit(&rel_path, &format!("{rel}: removed")) {
-                self.after_commit(rel, &sha, "removed");
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Actually deleted: drop it from the mirror and commit
+                // the removal.
+                soft(self.store.remove(path));
+                let rel_path = paths::store_rel(path);
+                self.commit_scoped(&rel_path, &format!("{rel}: removed"), rel, "removed");
+                return 0;
             }
-            return 0;
+            Err(e) => {
+                // EACCES, EIO, EMFILE… are NOT deletions. Removing the
+                // mirror here would commit a phantom delete.
+                soft(Err::<(), _>(format!("read {rel}: {e}")));
+                return 0;
+            }
         };
-        let content = String::from_utf8_lossy(&bytes);
+        if bytes.len() > MAX_TRACKED_BYTES {
+            soft(Err::<(), _>(format!(
+                "{rel}: {} bytes exceeds the {MAX_TRACKED_BYTES}-byte tracked-file cap — not committed",
+                bytes.len()
+            )));
+            return 0;
+        }
+        let scanned = gate::scan_bytes(path, &bytes);
+        let content = scanned.text.as_str();
 
-        let findings = match gate::scan(path, &content) {
+        let findings = match scanned.verdict {
             GateVerdict::Clean => Vec::new(),
             GateVerdict::Quarantine(f) => f,
             GateVerdict::Forbidden(why) => {
@@ -275,7 +345,7 @@ impl Engine {
             .filter(|f| !allowances.contains_key(&f.fingerprint))
             .collect();
         if !new.is_empty() {
-            return self.quarantine(path, rel, &content, &new);
+            return self.quarantine(path, rel, content, &new);
         }
 
         // Everything present is allowed; mask the redact-flagged spans
@@ -288,8 +358,19 @@ impl Engine {
         let needs_mask = findings
             .iter()
             .any(|f| must_redact.contains(f.fingerprint.as_str()));
+        if needs_mask && scanned.reencoded {
+            // The scan text is not byte-identical to the file (UTF-16
+            // or lossy). Masking would write corrupted content; hold
+            // instead of guessing.
+            soft(self.db.record(
+                EventKind::Held,
+                rel,
+                "redaction unsupported for re-encoded content",
+            ));
+            return self.quarantine(path, rel, content, &findings.iter().collect::<Vec<_>>());
+        }
         let stored: Vec<u8> = if needs_mask {
-            let masked = gate::mask_findings(&content, &findings, |f| {
+            let masked = gate::mask_findings(content, &findings, |f| {
                 !must_redact.contains(f.fingerprint.as_str())
             });
             // Trust nothing: the stored copy must scan clean apart
@@ -303,7 +384,7 @@ impl Engine {
                         self.db
                             .record(EventKind::Held, rel, "redaction verification failed"),
                     );
-                    return self.quarantine(path, rel, &content, &left.iter().collect::<Vec<_>>());
+                    return self.quarantine(path, rel, content, &left.iter().collect::<Vec<_>>());
                 }
             }
             masked.into_bytes()
@@ -314,20 +395,42 @@ impl Engine {
         // Summary must be computed against the OLD stored copy, so it
         // runs before mirror_in overwrites it.
         let stored_text = String::from_utf8_lossy(&stored).into_owned();
-        let summary = change_summary(&self.store, path, &stored_text);
-        let Ok(rel_path) = self.store.mirror_in(path, &stored) else {
-            return 0;
-        };
-        if let Ok(Some(sha)) = self.store.commit(&rel_path, &format!("{rel}: {summary}")) {
-            self.after_commit(rel, &sha, &summary);
+        let mut summary = change_summary(&self.store, path, &stored_text);
+        // Audit trail: allow-marked lines carry exempted secrets.
+        let allowed = gate::allow_marker_count(content);
+        if allowed > 0 {
+            summary.push_str(&format!(" ({allowed} allow-marked)"));
         }
+        let rel_path = match self.store.mirror_in(path, &stored) {
+            Ok(rel_path) => rel_path,
+            Err(e) => {
+                soft(Err::<(), _>(e));
+                return 0;
+            }
+        };
+        self.commit_scoped(&rel_path, &format!("{rel}: {summary}"), rel, &summary);
         0
+    }
+
+    /// Commit one path and record the outcome — including the failure,
+    /// which the old `if let Ok` shape silently discarded.
+    fn commit_scoped(&mut self, rel_path: &Path, message: &str, rel: &str, summary: &str) {
+        match self.store.commit(rel_path, message) {
+            Ok(Some(sha)) => self.after_commit(rel, &sha, summary),
+            Ok(None) => {}
+            Err(e) => {
+                soft(self.db.record(EventKind::Held, rel, "commit failed"));
+                soft(Err::<(), _>(e));
+            }
+        }
     }
 
     fn quarantine(&mut self, path: &Path, rel: &str, content: &str, new: &[&Finding]) -> usize {
         let diff = self.store.diff_against_live(path, content);
         let body = quarantine_body(new, &diff);
-        let meta = fingerprint_json(new);
+        // A pathological file can carry thousands of findings; the row
+        // must stay bounded.
+        let meta = fingerprint_json(&new[..new.len().min(MAX_META_FINGERPRINTS)]);
         let outcome = self
             .db
             .inbox_add(
@@ -354,15 +457,20 @@ impl Engine {
         if !path.is_file() {
             return 0;
         }
+        // Sentinel offers are unsolicited; a huge cache artifact must
+        // not be read wholesale into the event loop.
+        if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_SENTINEL_BYTES) {
+            return 0;
+        }
         let Ok(bytes) = std::fs::read(path) else {
             return 0;
         };
-        let content = String::from_utf8_lossy(&bytes);
-        if matches!(gate::scan(path, &content), GateVerdict::Forbidden(_)) {
+        let scanned = gate::scan_bytes(path, &bytes);
+        if matches!(scanned.verdict, GateVerdict::Forbidden(_)) {
             return 0;
         }
         let body = truncate_body(&gate::mask_all(
-            &self.store.diff_against_live(path, &content),
+            &self.store.diff_against_live(path, &scanned.text),
         ));
         let outcome = self
             .db
@@ -381,6 +489,8 @@ impl Engine {
     fn after_commit(&mut self, rel: &str, sha: &str, summary: &str) {
         soft(self.db.record(EventKind::Committed, rel, summary));
         self.last_commit = Some(sha.to_string());
+        self.commits += 1;
+        self.unpushed += 1;
         self.dirty = true;
     }
 
@@ -410,8 +520,12 @@ impl Engine {
         match result {
             Ok(()) => {
                 self.last_push = Some(now());
-                self.dirty = false;
+                // Only clean if nothing landed while the push ran — a
+                // commit made mid-push is NOT on the remote yet.
+                self.dirty = self.commits != self.push_snapshot;
+                self.unpushed = self.store.unpushed(self.remote_configured());
                 soft(self.db.record(EventKind::Pushed, self.store.branch(), ""));
+                soft(self.db.prune_events());
             }
             Err(err) => {
                 soft(
@@ -448,7 +562,8 @@ impl Engine {
                 provider,
                 name,
                 remove,
-            } => self.pkg_record(provider, &name, remove),
+                observe_only,
+            } => self.pkg_record(provider, &name, remove, observe_only),
             Request::PkgList => self.pkg_list(),
             Request::PkgIgnore {
                 provider,
@@ -472,7 +587,7 @@ impl Engine {
             inbox: self.db.inbox_count().unwrap_or(0),
             last_commit: self.last_commit.clone(),
             last_push: self.last_push.clone(),
-            unpushed: self.store.unpushed(!self.config.remote.is_empty()),
+            unpushed: self.unpushed,
             uptime_secs: self.started.elapsed().as_secs(),
         })
     }
@@ -489,6 +604,21 @@ impl Engine {
         if live.starts_with(paths::data_dir()) {
             return Response::Error {
                 message: "refused: that lives inside wukong's own data directory".to_string(),
+            };
+        }
+        // A file under any .git would land inside the store's own .git
+        // (or a nested repo); the watcher filters these anyway, so the
+        // track would be dead on arrival at best and repo-corrupting at
+        // worst. The reserved store namespaces are equally off-limits.
+        let rel_probe = paths::store_rel(&live);
+        if rel_probe.components().any(|c| c.as_os_str() == ".git")
+            || rel_probe.starts_with("__abs__/__abs__")
+            || rel_probe.starts_with("__wukong__")
+            || (live.starts_with(paths::home())
+                && (rel_probe.starts_with("__abs__") || rel_probe.starts_with("__wukong__")))
+        {
+            return Response::Error {
+                message: format!("refused: {} is a reserved path", paths::display(&live)),
             };
         }
         let bytes = match std::fs::read(&live) {
@@ -526,7 +656,7 @@ impl Engine {
     fn adopt(&mut self, live: &Path) {
         self.tracked_live.insert(live.to_path_buf());
         if let Some(parent) = live.parent() {
-            self.request_watch(parent);
+            self.request_watch(parent, false);
         }
     }
 
@@ -538,9 +668,7 @@ impl Engine {
                 self.tracked_live.remove(&live);
                 soft(self.store.remove(&live));
                 let rel_path = paths::store_rel(&live);
-                if let Ok(Some(_)) = self.store.commit(&rel_path, &format!("{rel}: untracked")) {
-                    self.dirty = true;
-                }
+                self.commit_scoped(&rel_path, &format!("{rel}: untracked"), &rel, "untracked");
                 soft(self.db.record(EventKind::Untracked, &rel, ""));
                 Response::Ok {
                     message: format!("stopped tracking {}", paths::display(&live)),
@@ -683,7 +811,7 @@ impl Engine {
                 skipped.push(format!("{} (cannot create parent)", paths::display(&live)));
                 continue;
             }
-            if std::fs::write(&live, &stored).is_err() {
+            if write_private(&live, &stored).is_err() {
                 skipped.push(format!("{} (write failed)", paths::display(&live)));
                 continue;
             }
@@ -725,8 +853,11 @@ fn change_summary(store: &Store, path: &Path, new_stored: &str) -> String {
 
 fn quarantine_body(findings: &[&Finding], diff: &str) -> String {
     let mut body = String::from("Held by the secret gate:\n");
-    for f in findings {
+    for f in findings.iter().take(20) {
         body.push_str(&format!("  line {}: {} — {}\n", f.line, f.rule, f.excerpt));
+    }
+    if findings.len() > 20 {
+        body.push_str(&format!("  (… and {} more)\n", findings.len() - 20));
     }
     body.push('\n');
     // The diff is evidence, so it is masked — the database and the TUI
@@ -758,6 +889,19 @@ fn truncate_body(text: &str) -> String {
     }
     out.push_str("(… truncated)");
     out
+}
+
+/// Restored files come back owner-only: dotfiles default private.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)
 }
 
 fn is_noise(path: &Path) -> bool {

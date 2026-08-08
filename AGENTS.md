@@ -28,7 +28,12 @@ much later phase.
   anything unexpected survives — keep that verification step.
 - **Inbox bodies are masked evidence.** Diffs and excerpts pass through
   `gate::mask_all` before hitting SQLite. Never store raw file content
-  or an unmasked diff in the inbox.
+  or an unmasked diff in the inbox. Three review-won specifics: a
+  finding's excerpt masks EVERY span on its line (never just its own —
+  line-mates leak); `mask_all` ignores `wukong:allow` markers (the
+  marker exempts commits, never evidence); and detection anchors must
+  tolerate diff prefixes (`+KEY=…` — the left boundary is
+  "not-a-word-character", never a whitespace whitelist).
 - **Binary files** (NUL in the first 8KB) pass the content gate — line
   rules over lossy text would spray entropy false positives. The
   forbidden-name layer still applies.
@@ -52,8 +57,13 @@ much later phase.
 - **macOS path canonicalization.** FSEvents reports real paths
   (`/private/var/…`); `$HOME` is often the symlink form (`/var/…`).
   `paths::home()` is canonicalized once for exactly this reason, and
-  `engine::resolve` canonicalizes CLI input's parent dir. If tracked
-  files stop matching their events, this is why.
+  `paths::resolve_input` canonicalizes CLI input. If tracked files
+  stop matching their events, this is why. `data_dir()` is canonical
+  AND pinned once at first use (it participates in path comparisons);
+  the state/config dirs deliberately are NOT — canonicalizing the
+  socket path changes its spelling mid-process and can blow the
+  104-byte `sun_path` limit in temp sandboxes. That exact bug shipped
+  briefly; the live drills caught it.
 - **Store churn must be ignored.** The watcher sees the store's own
   `.git` writes; `touch` filters anything under the store dir and any
   path with a `.git` component. Do not remove that filter.
@@ -68,9 +78,15 @@ much later phase.
   roster and precomputed sentinel lists — no SQLite per event. Keep it
   that way; a cargo build under a watched root fires thousands of
   events per second.
-- **Push runs off-loop** on spawn_blocking; the engine only tracks
-  `push_in_flight`. Nothing else that blocks on the network belongs in
-  the event loop.
+- **Push runs off-loop** on spawn_blocking with a hard 120s timeout;
+  the engine only tracks `push_in_flight`. Nothing else that blocks on
+  the network belongs in the event loop. Dirtiness is derived from
+  git, not trusted to a bool: startup seeds it from `store.unpushed`,
+  and `finish_push` clears it only when the commit counter matches the
+  `begin_push` snapshot — a commit landing mid-push stays dirty.
+- **The manifest defends itself.** A manifest that exists but fails to
+  parse makes saves REFUSE (never save an empty default over the real
+  one), and every manifest commit passes `gate::scan` first.
 - **One daemon.** Startup connects to the socket first and exits if
   someone answers. Don't remove that guard: launchd KeepAlive plus a
   manual start would otherwise double-commit.

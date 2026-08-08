@@ -8,12 +8,18 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use wukong_core::db::InboxOutcome;
 use wukong_core::events::{EventKind, InboxKind, Resolution};
+use wukong_core::gate::{self, GateVerdict};
 use wukong_core::ipc::{PkgEntry, Response};
 use wukong_core::pkg::{self, Provider};
 
 /// Pseudo-provider row marking that the first package reconcile has
 /// run; real providers are "formula"/"cask"/"app", so no collision.
 const BASELINE_MARKER: &str = "__meta__";
+
+/// How long a receiptless Cellar dir keeps re-arming the reconcile
+/// before we stop waiting for its pour to finish.
+#[allow(clippy::duration_suboptimal_units)] // Duration::from_mins is unstable
+const UNSETTLED_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
 
 impl Engine {
     /// Compare reality against the last acknowledged state and offer
@@ -28,27 +34,66 @@ impl Engine {
         if !self.config.packages.enabled {
             return 0;
         }
+        // Homebrew can appear after the daemon started; pick it up.
+        if self.pkg_roots.cellar.is_none() || self.pkg_roots.caskroom.is_none() {
+            let fresh = self.config.pkg_roots();
+            for root in fresh.watch_roots() {
+                let canon = wukong_core::paths::canonicalize_lenient(&root);
+                if !self.pkg_watch.contains(&canon) {
+                    self.request_watch(&canon, false);
+                    self.pkg_watch.push(canon);
+                }
+            }
+            self.pkg_roots = fresh;
+        }
         let current = self.pkg_roots.installed();
+        self.pkg_installed.clone_from(&current);
+        // A pour in progress (formula dir, no receipt yet) means the
+        // interesting event — the receipt — will land too deep for the
+        // watch. Re-arm so the next ticks re-check, bounded so a
+        // permanently receiptless dir cannot spin the reconcile.
+        if self
+            .pkg_roots
+            .cellar
+            .as_deref()
+            .is_some_and(pkg::unsettled_formulae)
+        {
+            let since = *self
+                .pkg_unsettled_since
+                .get_or_insert_with(std::time::Instant::now);
+            if since.elapsed() < UNSETTLED_WINDOW {
+                self.pkg_dirty = Some(std::time::Instant::now());
+            }
+        } else {
+            self.pkg_unsettled_since = None;
+        }
         // An explicit marker, not row-count inference: a machine whose
         // very first reconcile finds zero packages must still count as
-        // baselined afterwards.
-        let baseline = self
-            .db
-            .pkg_state(BASELINE_MARKER)
-            .map_or(true, |rows| rows.is_empty());
+        // baselined afterwards. A DB error must not masquerade as
+        // "first run" — a silent re-baseline would swallow every real
+        // transition this round.
+        let baseline = match self.db.pkg_state(BASELINE_MARKER) {
+            Ok(rows) => rows.is_empty(),
+            Err(e) => {
+                soft(Err::<(), _>(e));
+                return 0;
+            }
+        };
         if baseline {
             soft(self.db.pkg_state_add(BASELINE_MARKER, "done"));
         }
         let mut new_items = 0;
         for (provider, installed) in current {
-            let prev: BTreeSet<String> = self
-                .db
-                .pkg_state(provider.as_str())
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
+            let prev: BTreeSet<String> = self.db.pkg_state(provider.as_str()).unwrap_or_default();
             for name in installed.difference(&prev) {
                 soft(self.db.pkg_state_add(provider.as_str(), name));
+                // Reappearing resolves any stale "gone" offer — else
+                // approving it later would drop an installed package.
+                soft(self.db.inbox_resolve_open(
+                    InboxKind::PackageGone,
+                    &pkg::subject(provider, name),
+                    Resolution::Ignore,
+                ));
                 if baseline
                     || self.manifest.contains(provider, name)
                     || self.manifest.ignored(provider, name)
@@ -59,6 +104,12 @@ impl Engine {
             }
             for name in prev.difference(&installed) {
                 soft(self.db.pkg_state_remove(provider.as_str(), name));
+                // Disappearing resolves any stale adoption offer.
+                soft(self.db.inbox_resolve_open(
+                    InboxKind::Package,
+                    &pkg::subject(provider, name),
+                    Resolution::Ignore,
+                ));
                 if baseline || !self.manifest.contains(provider, name) {
                     continue;
                 }
@@ -112,29 +163,78 @@ impl Engine {
     }
 
     /// Persist the manifest into the store and commit it under the
-    /// packages banner.
+    /// packages banner. Refused while the on-disk manifest is
+    /// unparseable (saving would erase the real one), and gated like
+    /// everything else that reaches a commit — a token-shaped package
+    /// name or a poisoned clone must not ride into git.
     fn commit_manifest(&mut self, summary: &str) {
+        if self.manifest_poisoned {
+            soft(Err::<(), _>(
+                "manifest on disk is unparseable — fix or delete it; not saving",
+            ));
+            return;
+        }
+        if let Ok(text) = toml::to_string_pretty(&self.manifest)
+            && let GateVerdict::Quarantine(_) = gate::scan(Path::new(pkg::MANIFEST_REL), &text)
+        {
+            soft(self.db.record(
+                EventKind::Held,
+                "packages",
+                "manifest failed the secret gate — not committed",
+            ));
+            return;
+        }
         soft(self.manifest.save(self.store.dir()));
-        if let Ok(Some(sha)) = self.store.commit(
+        match self.store.commit(
             Path::new(pkg::MANIFEST_REL),
             &format!("packages: {summary}"),
         ) {
-            soft(self.db.record(EventKind::Committed, "packages", summary));
-            self.last_commit = Some(sha);
-            self.dirty = true;
+            Ok(Some(sha)) => {
+                soft(self.db.record(EventKind::Committed, "packages", summary));
+                self.last_commit = Some(sha);
+                self.commits += 1;
+                self.unpushed += 1;
+                self.dirty = true;
+            }
+            Ok(None) => {}
+            Err(e) => soft(Err::<(), _>(e)),
         }
     }
 
-    pub(super) fn pkg_record(&mut self, provider: Provider, name: &str, remove: bool) -> Response {
+    pub(super) fn pkg_record(
+        &mut self,
+        provider: Provider,
+        name: &str,
+        remove: bool,
+        observe_only: bool,
+    ) -> Response {
         let subject = pkg::subject(provider, name);
+        if observe_only {
+            // --no-track: acknowledge reality so the watcher does not
+            // offer this install for adoption, but keep the manifest
+            // untouched — the user opted out.
+            if remove {
+                soft(self.db.pkg_state_remove(provider.as_str(), name));
+            } else {
+                soft(self.db.pkg_state_add(provider.as_str(), name));
+            }
+            soft(
+                self.db
+                    .inbox_resolve_open(InboxKind::Package, &subject, Resolution::Ignore),
+            );
+            return Response::Ok {
+                message: format!("{name} installed, not tracked (your call)"),
+            };
+        }
         if remove {
             self.manifest.remove(provider, name);
             soft(self.db.pkg_state_remove(provider.as_str(), name));
             soft(self.db.record(EventKind::PkgRemoved, &subject, ""));
             // An explicit removal supersedes any pending gone-offer.
-            let _ =
+            soft(
                 self.db
-                    .inbox_resolve_open(InboxKind::PackageGone, &subject, Resolution::Approve);
+                    .inbox_resolve_open(InboxKind::PackageGone, &subject, Resolution::Approve),
+            );
             self.commit_manifest(&format!("-{name}"));
             Response::Ok {
                 message: format!("{name} removed from the manifest"),
@@ -156,8 +256,10 @@ impl Engine {
     }
 
     pub(super) fn pkg_list(&self) -> Response {
+        // Served from the reconcile's cache: a TUI polling every two
+        // seconds must not trigger a full Cellar walk each time.
         let installed: HashMap<Provider, BTreeSet<String>> =
-            self.pkg_roots.installed().into_iter().collect();
+            self.pkg_installed.iter().cloned().collect();
         Response::Packages {
             entries: self
                 .manifest

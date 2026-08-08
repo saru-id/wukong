@@ -6,6 +6,7 @@
 //! "I lost events, rescan" signal, which must never be dropped.
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
@@ -18,6 +19,10 @@ pub enum WatchSignal {
 
 pub struct FsWatcher {
     watcher: RecommendedWatcher,
+    /// Roots already registered (true = recursive). Re-registering an
+    /// `FSEvents` root tears down and rebuilds the entire stream — 20
+    /// files tracked in one directory must not mean 20 rebuilds.
+    watched: HashMap<PathBuf, bool>,
 }
 
 impl FsWatcher {
@@ -38,7 +43,13 @@ impl FsWatcher {
                     let _ = tx.send(WatchSignal::Rescan);
                 }
             })?;
-        Ok((Self { watcher }, rx))
+        Ok((
+            Self {
+                watcher,
+                watched: HashMap::new(),
+            },
+            rx,
+        ))
     }
 
     /// Watch a path with an explicit mode. Non-recursive is the norm —
@@ -49,11 +60,22 @@ impl FsWatcher {
         if !path.exists() {
             return;
         }
+        // Skip when this root (or a recursive superset of it) is
+        // already registered.
+        if self.watched.get(path).is_some_and(|&r| r || !recursive) {
+            return;
+        }
         let mode = if recursive && path.is_dir() {
             RecursiveMode::Recursive
         } else {
             RecursiveMode::NonRecursive
         };
-        let _ = self.watcher.watch(path, mode);
+        // A failed watch means a silently ungoverned path; say so.
+        match self.watcher.watch(path, mode) {
+            Ok(()) => {
+                self.watched.insert(path.to_path_buf(), recursive);
+            }
+            Err(e) => eprintln!("wukongd: cannot watch {}: {e}", path.display()),
+        }
     }
 }

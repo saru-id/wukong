@@ -85,12 +85,19 @@ pub struct Ignore {
 }
 
 impl Manifest {
-    #[must_use]
-    pub fn load(store_dir: &Path) -> Self {
-        std::fs::read_to_string(store_dir.join(MANIFEST_REL))
-            .ok()
-            .and_then(|text| toml::from_str(&text).ok())
-            .unwrap_or_default()
+    /// `Ok(None)` = no manifest yet. A manifest that exists but fails
+    /// to parse is an error the caller must handle — silently starting
+    /// empty and then saving would erase the real one.
+    pub fn load(store_dir: &Path) -> Result<Option<Self>, String> {
+        let path = store_dir.join(MANIFEST_REL);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        };
+        toml::from_str(&text)
+            .map(Some)
+            .map_err(|e| format!("{} does not parse: {e}", path.display()))
     }
 
     pub fn save(&self, store_dir: &Path) -> std::io::Result<()> {
@@ -203,18 +210,21 @@ impl PkgRoots {
         }
     }
 
-    /// Everything installed right now, per provider.
+    /// Everything installed right now, per provider. A provider whose
+    /// root cannot be enumerated is OMITTED rather than reported empty
+    /// — one failed `read_dir` must not turn the whole manifest into
+    /// "package gone" offers.
     #[must_use]
     pub fn installed(&self) -> Vec<(Provider, BTreeSet<String>)> {
         let mut out = Vec::new();
-        if let Some(cellar) = &self.cellar {
-            out.push((Provider::Formula, installed_formulae(cellar)));
+        if let Some(set) = self.cellar.as_deref().and_then(installed_formulae) {
+            out.push((Provider::Formula, set));
         }
-        if let Some(caskroom) = &self.caskroom {
-            out.push((Provider::Cask, installed_casks(caskroom)));
+        if let Some(set) = self.caskroom.as_deref().and_then(installed_casks) {
+            out.push((Provider::Cask, set));
         }
-        if let Some(apps) = &self.applications {
-            out.push((Provider::App, installed_apps(apps)));
+        if let Some(set) = self.applications.as_deref().and_then(installed_apps) {
+            out.push((Provider::App, set));
         }
         out
     }
@@ -238,11 +248,9 @@ struct Receipt {
 /// Formulae present in the Cellar that were installed on request —
 /// dependencies never surface. Reads receipts, shells nothing.
 #[must_use]
-pub fn installed_formulae(cellar: &Path) -> BTreeSet<String> {
+pub fn installed_formulae(cellar: &Path) -> Option<BTreeSet<String>> {
     let mut out = BTreeSet::new();
-    let Ok(entries) = std::fs::read_dir(cellar) else {
-        return out;
-    };
+    let entries = std::fs::read_dir(cellar).ok()?;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') || !entry.path().is_dir() {
@@ -262,40 +270,62 @@ pub fn installed_formulae(cellar: &Path) -> BTreeSet<String> {
             out.insert(name);
         }
     }
-    out
+    Some(out)
+}
+
+/// Is anything in the Cellar still mid-install — a formula directory
+/// with no receipt yet? A pour in progress must re-arm the reconcile
+/// or the finished install slips past unnoticed (its receipt lands
+/// too deep for the non-recursive watch).
+#[must_use]
+pub fn unsettled_formulae(cellar: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(cellar) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || !entry.path().is_dir() {
+            return false;
+        }
+        !std::fs::read_dir(entry.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|version| version.path().join("INSTALL_RECEIPT.json").is_file())
+    })
 }
 
 /// Casks are Caskroom directories.
 #[must_use]
-pub fn installed_casks(caskroom: &Path) -> BTreeSet<String> {
+pub fn installed_casks(caskroom: &Path) -> Option<BTreeSet<String>> {
     list_dirs(caskroom)
 }
 
 /// Apps are `.app` bundles, named without the extension.
 #[must_use]
-pub fn installed_apps(applications: &Path) -> BTreeSet<String> {
-    let Ok(entries) = std::fs::read_dir(applications) else {
-        return BTreeSet::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            name.strip_suffix(".app").map(str::to_string)
-        })
-        .collect()
+pub fn installed_apps(applications: &Path) -> Option<BTreeSet<String>> {
+    let entries = std::fs::read_dir(applications).ok()?;
+    Some(
+        entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.strip_suffix(".app").map(str::to_string)
+            })
+            .collect(),
+    )
 }
 
-fn list_dirs(dir: &Path) -> BTreeSet<String> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return BTreeSet::new();
-    };
-    entries
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with('.'))
-        .collect()
+fn list_dirs(dir: &Path) -> Option<BTreeSet<String>> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    Some(
+        entries
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with('.'))
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -321,7 +351,7 @@ mod tests {
     fn receipts_separate_requests_from_dependencies() {
         let tmp = tempfile::TempDir::new().unwrap();
         fake_cellar(tmp.path());
-        let found = installed_formulae(tmp.path());
+        let found = installed_formulae(tmp.path()).unwrap();
         assert_eq!(found.into_iter().collect::<Vec<_>>(), vec!["jq"]);
     }
 
@@ -330,7 +360,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(tmp.path().join("Raycast.app")).unwrap();
         std::fs::create_dir_all(tmp.path().join("Utilities")).unwrap();
-        let found = installed_apps(tmp.path());
+        let found = installed_apps(tmp.path()).unwrap();
         assert_eq!(found.into_iter().collect::<Vec<_>>(), vec!["Raycast"]);
     }
 
@@ -352,7 +382,7 @@ mod tests {
             "{text}"
         );
 
-        let loaded = Manifest::load(tmp.path());
+        let loaded = Manifest::load(tmp.path()).unwrap().unwrap();
         assert_eq!(loaded, m);
         assert!(loaded.contains(Provider::Formula, "jq"));
         assert!(loaded.ignored(Provider::App, "Safari"));

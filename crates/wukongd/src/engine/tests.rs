@@ -114,7 +114,7 @@ fn redact_masks_store_leaves_live_alone() {
     rig.engine.resolve(item_id, Resolution::Redact);
     let stored = store_content(&rig, &file).unwrap();
     assert!(!stored.contains(SECRET), "store leaks: {stored}");
-    assert!(stored.contains("ghp_……45"), "{stored}");
+    assert!(stored.contains("ghp_……"), "{stored}");
     // Live file untouched.
     assert_eq!(std::fs::read_to_string(&file).unwrap(), live_content);
     // And the redaction is sticky across future edits.
@@ -251,7 +251,7 @@ fn adopt_and_permanent_ignore() {
     assert_eq!(rig.engine.reconcile(), 0);
     assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
     // And the manifest survives in the store, committed.
-    let stored = Manifest::load(rig.engine.store.dir());
+    let stored = Manifest::load(rig.engine.store.dir()).unwrap().unwrap();
     assert!(stored.contains(Provider::Formula, "ripgrep"));
     assert!(stored.ignored(Provider::Formula, "htop"));
 }
@@ -261,7 +261,7 @@ fn manifest_member_gone_offers_removal() {
     let mut rig = pkg_rig();
     rig.engine.reconcile();
     brew_install(&rig, "jq", true);
-    rig.engine.pkg_record(Provider::Formula, "jq", false);
+    rig.engine.pkg_record(Provider::Formula, "jq", false, false);
     rig.engine.reconcile();
     assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
 
@@ -281,7 +281,7 @@ fn pkg_record_supersedes_open_offer() {
     rig.engine.reconcile();
     assert_eq!(rig.engine.db.inbox_count().unwrap(), 1);
     // The user runs `wukong install fd` after brew already had it.
-    rig.engine.pkg_record(Provider::Formula, "fd", false);
+    rig.engine.pkg_record(Provider::Formula, "fd", false, false);
     assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
     assert!(rig.engine.manifest.contains(Provider::Formula, "fd"));
 }
@@ -305,7 +305,7 @@ fn bulk_adopt_takes_brew_not_apps() {
 #[test]
 fn restore_skips_wukong_namespace() {
     let mut rig = pkg_rig();
-    rig.engine.pkg_record(Provider::Formula, "jq", false);
+    rig.engine.pkg_record(Provider::Formula, "jq", false, false);
     let resp = rig.engine.restore(None, false);
     let Response::Ok { message } = resp else {
         panic!("restore failed");

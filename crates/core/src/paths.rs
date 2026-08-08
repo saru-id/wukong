@@ -80,6 +80,20 @@ fn xdg(var: &str, fallback: &str) -> PathBuf {
         .join("wukong")
 }
 
+/// The data dir is the one XDG root that participates in path
+/// COMPARISONS (the store-churn filter, the own-data-dir track guard),
+/// so it must be canonical — and STABLY so: resolved once, after
+/// making sure it exists, because canonicalization of a not-yet-created
+/// directory would silently change spelling mid-process. The state and
+/// config dirs are never compared against watcher paths and keep the
+/// caller's spelling (a canonicalized temp state dir could also push
+/// the socket path past the 104-byte `sun_path` limit).
+static DATA_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    let dir = xdg("XDG_DATA_HOME", ".local/share");
+    let _ = ensure_private_dir(&dir);
+    canonicalize_lenient(&dir)
+});
+
 /// `~/.config/wukong`.
 #[must_use]
 pub fn config_dir() -> PathBuf {

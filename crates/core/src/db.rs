@@ -23,9 +23,15 @@ pub struct Db {
 impl Db {
     pub fn open(path: &Path) -> Result<Self, DbError> {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+            crate::paths::ensure_private_dir(dir)?;
         }
         let conn = Connection::open(path)?;
+        // The database holds quarantine evidence; owner-only, like
+        // everything else wukong writes.
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS events (
@@ -71,12 +77,20 @@ impl Db {
         if !has_meta {
             conn.execute_batch("ALTER TABLE inbox ADD COLUMN meta TEXT NOT NULL DEFAULT ''")?;
         }
-        // Keep the event log from growing without bound.
-        conn.execute(
+        let db = Self { conn };
+        db.prune_events()?;
+        Ok(db)
+    }
+
+    /// Keep the event log from growing without bound. Called at open
+    /// and periodically by the daemon — a long-lived process must not
+    /// depend on restarts for hygiene.
+    pub fn prune_events(&self) -> Result<(), DbError> {
+        self.conn.execute(
             "DELETE FROM events WHERE id <= (SELECT COALESCE(MAX(id), 0) - 10000 FROM events)",
             [],
         )?;
-        Ok(Self { conn })
+        Ok(())
     }
 
     // ---- Events --------------------------------------------------------

@@ -15,11 +15,10 @@ pub fn install(name: &str, cask: bool, no_track: bool) -> anyhow::Result<()> {
     } else {
         vec!["install", name]
     })?;
-    if no_track {
-        println!("installed {name} (not recorded — you opted out)");
-        return Ok(());
-    }
-    record(provider_of(cask), name, false);
+    // Even an untracked install is ACKNOWLEDGED to the daemon —
+    // otherwise the watcher would offer it for adoption seconds after
+    // the user explicitly opted out.
+    record(provider_of(cask), name, false, no_track);
     Ok(())
 }
 
@@ -29,7 +28,7 @@ pub fn rm(name: &str, cask: bool) -> anyhow::Result<()> {
     } else {
         vec!["uninstall", name]
     })?;
-    record(provider_of(cask), name, true);
+    record(provider_of(cask), name, true, false);
     Ok(())
 }
 
@@ -41,11 +40,12 @@ fn provider_of(cask: bool) -> Provider {
     }
 }
 
-fn record(provider: Provider, name: &str, remove: bool) {
+fn record(provider: Provider, name: &str, remove: bool, observe_only: bool) {
     let req = Request::PkgRecord {
         provider,
         name: name.to_string(),
         remove,
+        observe_only,
     };
     match client::call(req) {
         Ok(Response::Ok { message }) => println!("{message}"),

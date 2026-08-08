@@ -18,7 +18,7 @@ mod watcher;
 use engine::Engine;
 use std::os::unix::fs::PermissionsExt as _;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use watcher::WatchSignal;
@@ -57,60 +57,43 @@ fn load_config_or_exit() -> Config {
 async fn main() -> anyhow::Result<()> {
     let config = load_config_or_exit();
 
-    // Single instance: if a daemon already answers on the socket, this
-    // one must not steal it — launchd KeepAlive plus a manual start
-    // would otherwise run two engines over one store.
+    // Single instance, atomically: an OS-level file lock held for the
+    // process lifetime. The connect probe alone is a TOCTOU — two
+    // simultaneous startups both pass it, and the second silently
+    // steals the socket.
     let socket = paths::socket_file();
-    if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+    if let Some(dir) = socket.parent() {
+        paths::ensure_private_dir(dir)?;
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(socket.with_extension("lock"))?;
+    if lock.try_lock().is_err() {
         eprintln!("wukongd: another instance is already running");
         std::process::exit(1);
     }
 
     let mut engine = Engine::new(config, &paths::db_file(), &paths::store_dir())?;
     let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
+    // Clients whose `wukong push` joined an in-flight push: they get
+    // the real result when it lands, not an early "in progress" lie.
+    let mut push_waiters: Vec<tokio::sync::oneshot::Sender<Response>> = Vec::new();
 
     // Filesystem watcher → Msg::Fs / Msg::Rescan.
-    let (mut fs_watcher, mut fs_rx) = watcher::FsWatcher::start()?;
+    let (mut fs_watcher, fs_rx) = watcher::FsWatcher::start()?;
     for (root, recursive) in engine.initial_watch_roots() {
         fs_watcher.watch(&root, recursive);
     }
-    {
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            while let Some(signal) = fs_rx.recv().await {
-                let msg = match signal {
-                    WatchSignal::Touched(path) => Msg::Fs(path),
-                    WatchSignal::Rescan => Msg::Rescan,
-                };
-                let _ = tx.send(msg);
-            }
-        });
-    }
+    bridge_watcher(fs_rx, tx.clone());
 
     // Debounce + push timers.
     spawn_timer(tx.clone(), Duration::from_secs(1), || Msg::DebounceTick);
     let push_interval = Duration::from_secs(engine.config.push_interval_secs.max(10));
     spawn_timer(tx.clone(), push_interval, || Msg::PushTick);
 
-    // Socket server → Msg::Client. The state dir and socket are ours
-    // alone: 0700 on the dir, 0600 on the socket.
-    if let Some(dir) = socket.parent() {
-        paths::ensure_private_dir(dir)?;
-    }
-    let _ = std::fs::remove_file(&socket);
-    let listener = UnixListener::bind(&socket)?;
-    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-    {
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    continue;
-                };
-                tokio::spawn(serve_client(stream, tx.clone()));
-            }
-        });
-    }
+    serve_socket(&socket, tx.clone())?;
 
     // Signals are just another message; the loop exits and cleans up.
     {
@@ -129,8 +112,12 @@ async fn main() -> anyhow::Result<()> {
 
     let notify_on = engine.config.notifications;
 
-    // Catch anything installed or changed while the daemon was down.
-    engine.reconcile();
+    // Catch anything installed or changed while the daemon was down —
+    // those count as new items worth a notification too.
+    let startup_items = engine.reconcile();
+    if notify_on && startup_items > 0 {
+        notify_user::inbox(startup_items);
+    }
 
     // The one loop that owns the engine.
     while let Some(msg) = rx.recv().await {
@@ -148,17 +135,36 @@ async fn main() -> anyhow::Result<()> {
                     start_push(&mut engine, tx.clone(), None);
                 }
             }
-            Msg::PushDone(result) => engine.finish_push(result),
+            Msg::PushDone(result) => {
+                let response = match &result {
+                    Ok(()) => Response::Ok {
+                        message: "pushed".to_string(),
+                    },
+                    Err(e) => Response::Error {
+                        message: format!("push failed: {e}"),
+                    },
+                };
+                for waiter in push_waiters.drain(..) {
+                    let _ = waiter.send(response.clone());
+                }
+                engine.finish_push(result);
+            }
             Msg::Client { req, reply } => {
                 match req {
+                    Request::PushNow if engine.push_in_flight() => {
+                        // Join the in-flight push; answer with its
+                        // actual outcome.
+                        push_waiters.push(reply);
+                    }
                     Request::PushNow => handle_push_now(&mut engine, tx.clone(), reply),
                     req => {
                         let _ = reply.send(engine.handle(req));
                     }
                 }
-                // Tracking a new file asks the loop to watch its dir.
-                for dir in engine.drain_watch_requests() {
-                    fs_watcher.watch(&dir, false);
+                // Tracking a new file (or promoting a sentinel dir)
+                // asks the loop to watch it.
+                for (dir, recursive) in engine.drain_watch_requests() {
+                    fs_watcher.watch(&dir, recursive);
                 }
             }
             Msg::Shutdown => break,
@@ -200,17 +206,48 @@ fn handle_push_now(
     tx: mpsc::UnboundedSender<Msg>,
     reply: tokio::sync::oneshot::Sender<Response>,
 ) {
-    if !engine.remote_configured() {
+    if engine.remote_configured() {
+        start_push(engine, tx, Some(reply));
+    } else {
         let _ = reply.send(Response::Error {
             message: "no remote configured — set one in config.toml and restart".to_string(),
         });
-    } else if engine.push_in_flight() {
-        let _ = reply.send(Response::Ok {
-            message: "push already in progress".to_string(),
-        });
-    } else {
-        start_push(engine, tx, Some(reply));
     }
+}
+
+/// Forward watcher signals into the engine loop's mailbox.
+fn bridge_watcher(mut fs_rx: mpsc::UnboundedReceiver<WatchSignal>, tx: mpsc::UnboundedSender<Msg>) {
+    tokio::spawn(async move {
+        while let Some(signal) = fs_rx.recv().await {
+            let msg = match signal {
+                WatchSignal::Touched(path) => Msg::Fs(path),
+                WatchSignal::Rescan => Msg::Rescan,
+            };
+            let _ = tx.send(msg);
+        }
+    });
+}
+
+/// Bind the unix socket (0600 in the 0700 state dir) and accept
+/// clients forever, backing off on accept errors instead of spinning.
+fn serve_socket(socket: &std::path::Path, tx: mpsc::UnboundedSender<Msg>) -> anyhow::Result<()> {
+    let _ = std::fs::remove_file(socket);
+    let listener = UnixListener::bind(socket)?;
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    tokio::spawn(serve_client(stream, tx.clone()));
+                }
+                Err(e) => {
+                    eprintln!("wukongd: accept failed: {e}");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        }
+    });
+    Ok(())
 }
 
 fn spawn_timer<F>(tx: mpsc::UnboundedSender<Msg>, period: Duration, make: F)
@@ -234,7 +271,9 @@ where
 /// malformed request.
 async fn serve_client(stream: tokio::net::UnixStream, tx: mpsc::UnboundedSender<Msg>) {
     let (read, mut write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
+    // Bound what one connection may buffer: a client that streams
+    // forever without a newline must not grow the daemon unboundedly.
+    let mut lines = BufReader::new(read.take(1024 * 1024)).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {
             continue;

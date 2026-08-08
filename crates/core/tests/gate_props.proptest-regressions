@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 77cd7831fe0a6d0aef3b81baf31a55c19ca612269441907f2f27dd7a4e016d33 # shrinks to prefix = "+", token = "aAaA0++a0AA0++aa0aAA0A0a0a000aAAA+a/a/0/"
+cc 6870206e61c1733f945df67420eedf8f9dfda96793c638d31f74e67288a8641b # shrinks to prefix = "", token = "++A00AAAA+A/aa+++A+0a++aA//00+aA0+0+AaAA"
+cc c8969ce29987629d34ba78a5f5ee9aeb6522c47a86c41b8c6da1942fecaa0f59 # shrinks to prefix = "+", token = "/aA+a0AA0+a0Aaa/Aaa+AaA0/aa0+A0+a+a+00+0"
+cc 878c3531cfbb020282ff1cab12e4a0adaf5fadc9f6ff935308e803712e75309a # shrinks to prefix = "", token = "+a+/A+A+0aaA+Aa0aaA0/a0/aa0+A/AAaa+a0000"
+cc 72c74301f531a49cb6b1f35afd113f806cceb342c4341bb9d9ec8d5beca77c65 # shrinks to prefix = "", token = "/a0/AaAA+0A0AAa0A+/A0+0aa+/a+Aa+0Aa+aAA0"

@@ -80,7 +80,7 @@ proptest! {
     ) {
         let content = format!("export {prefix}KEY={token}\n");
         let fs = findings(&content);
-        prop_assume!(!fs.is_empty());
+        prop_assert!(!fs.is_empty(), "detector missed: {content}");
         let masked = gate::mask_findings(&content, &fs, |_| false);
         prop_assert_eq!(scan(&masked), GateVerdict::Clean, "masked still dirty: {}", masked);
     }
@@ -94,7 +94,7 @@ proptest! {
     ) {
         let content = format!("export {prefix}KEY={token}\n");
         let fs = findings(&content);
-        prop_assume!(!fs.is_empty());
+        prop_assert!(!fs.is_empty(), "detector missed: {content}");
         prop_assert!(
             !gate::mask_findings(&content, &fs, |_| false).contains(&token),
             "mask_findings leaked {token}"
@@ -103,6 +103,39 @@ proptest! {
             !gate::mask_all(&content).contains(&token),
             "mask_all leaked {token}"
         );
+    }
+
+    /// Invariant 3, sharpened per review: TWO secrets on one line —
+    /// every excerpt and every masked output must hide BOTH.
+    #[test]
+    fn multi_secret_lines_never_leak_linemates(
+        a in secret_token(),
+        b in secret_token(),
+    ) {
+        let content = format!("export A={a} B={b}\n");
+        let fs = findings(&content);
+        prop_assume!(fs.len() >= 2);
+        let masked = gate::mask_findings(&content, &fs, |_| false);
+        prop_assert!(!masked.contains(&a) && !masked.contains(&b), "{masked}");
+        for f in &fs {
+            prop_assert!(
+                !f.excerpt.contains(&a) && !f.excerpt.contains(&b),
+                "excerpt leaks: {}",
+                f.excerpt
+            );
+        }
+    }
+
+    /// Invariant 3, diff-shaped per review: evidence lines carry +/-
+    /// prefixes and column-zero assignments; mask_all must still mask.
+    #[test]
+    fn diff_prefixed_evidence_is_masked(
+        prefix in prop::sample::select(vec!["+", "-", " ", ""]),
+        token in secret_token(),
+    ) {
+        let diff = format!("@@ -1 +1 @@\n{prefix}PASSWORD={token}\n");
+        let masked = gate::mask_all(&diff);
+        prop_assert!(!masked.contains(&token), "diff evidence leaked: {masked}");
     }
 
     /// Invariant 4: fingerprints are a deterministic 16-char hex digest

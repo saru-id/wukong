@@ -46,10 +46,15 @@ pub fn run() -> anyhow::Result<()> {
                 }
             }
             Err(e) => {
-                // An empty or brand-new remote clones nothing — fall
-                // back to a fresh local store that will push to it.
-                println!("  note: clone failed ({e}); starting a fresh store");
-                Store::open(&store_dir, &config.machine)?;
+                // Do NOT fall back to a fresh store: if the remote has
+                // real history and merely failed to clone (network,
+                // auth), a fresh store would diverge from it forever.
+                anyhow::bail!(
+                    "cloning {} failed: {e}\n\
+                     fix the remote or your access and run `wukong init` again\n\
+                     (for a brand-new empty store, create the repo first or leave the remote blank)",
+                    config.remote
+                );
             }
         }
     } else {

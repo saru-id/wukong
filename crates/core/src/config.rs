@@ -104,12 +104,15 @@ impl Config {
     }
 
     pub fn save(&self) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
         let path = paths::config_file();
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let text = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(path, text)
+        std::fs::write(&path, text)?;
+        // The remote URL may carry credentials; owner-only.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
     }
 
     /// Sentinel entries as canonical absolute paths — `/etc` is a

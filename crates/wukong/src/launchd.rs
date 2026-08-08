@@ -41,9 +41,10 @@ pub fn run(action: DaemonAction) -> anyhow::Result<()> {
     let service = format!("{domain}/{LABEL}");
     match action {
         DaemonAction::Start => {
-            if !agent_path().exists() {
-                install()?;
-            }
+            // Always (re)bootstrap: after `daemon stop` the plist is
+            // still on disk but the service is booted out, and a bare
+            // kickstart would fail against an unregistered service.
+            install()?;
             launchctl(&["kickstart", "-k", &service])?;
             println!("wukongd started");
         }
@@ -94,11 +95,18 @@ fn uid() -> anyhow::Result<u32> {
         .map_err(|_| anyhow::anyhow!("could not determine uid"))
 }
 
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 fn plist() -> String {
     let bin = daemon_binary();
-    let bin = bin.to_string_lossy();
+    let bin = xml_escape(&bin.to_string_lossy());
     let log = wukong_core::paths::state_dir().join("wukongd.log");
-    let log = log.to_string_lossy();
+    let log = xml_escape(&log.to_string_lossy());
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

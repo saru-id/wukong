@@ -6,7 +6,7 @@ use crate::events::{Event, InboxItem, Resolution};
 use crate::pkg::Provider;
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
@@ -57,6 +57,12 @@ pub enum Request {
         provider: Provider,
         name: String,
         remove: bool,
+        /// Acknowledge the install in package state WITHOUT adding it
+        /// to the manifest — the `--no-track` opt-out. Without this
+        /// acknowledgement the watcher would offer the package for
+        /// adoption seconds after the user declined to track it.
+        #[serde(default)]
+        observe_only: bool,
     },
     /// Manifest entries with their live state.
     PkgList,
