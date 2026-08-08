@@ -1,7 +1,8 @@
 //! The launchd LaunchAgent: keeps wukongd alive across logins without
 //! a polling loop of its own. We write the plist, then drive it with
-//! `launchctl`. Everything degrades to a clear message rather than a
-//! panic when launchctl is unavailable (a non-macOS host, say).
+//! `launchctl`. Bootout of a not-loaded agent is tolerated (that's the
+//! idempotent path); everything else fails loudly — a ✓ the user reads
+//! must mean the agent is actually running.
 
 use crate::DaemonAction;
 use std::path::PathBuf;
@@ -28,7 +29,7 @@ pub fn install() -> anyhow::Result<()> {
     }
     std::fs::write(&path, plist)?;
     // bootout first so a re-init reloads cleanly, then bootstrap.
-    let domain = format!("gui/{}", uid());
+    let domain = format!("gui/{}", uid()?);
     let _ = launchctl(&["bootout", &domain, path.to_str().unwrap_or_default()]);
     launchctl(&["bootstrap", &domain, path.to_str().unwrap_or_default()])?;
     launchctl(&["enable", &format!("{domain}/{LABEL}")])?;
@@ -36,7 +37,7 @@ pub fn install() -> anyhow::Result<()> {
 }
 
 pub fn run(action: DaemonAction) -> anyhow::Result<()> {
-    let domain = format!("gui/{}", uid());
+    let domain = format!("gui/{}", uid()?);
     let service = format!("{domain}/{LABEL}");
     match action {
         DaemonAction::Start => {
@@ -69,39 +70,34 @@ fn launchctl(args: &[&str]) -> anyhow::Result<()> {
     let out = std::process::Command::new("launchctl")
         .args(args)
         .output()?;
-    // launchctl returns non-zero for already-loaded / already-out; the
-    // caller's intent is idempotent, so only surface real spawn errors
-    // and a stderr worth reading.
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if !stderr.trim().is_empty() && !stderr.contains("No such process") {
-            // Non-fatal: report but keep going.
-            eprintln!(
-                "launchctl {}: {}",
-                args.first().unwrap_or(&""),
-                stderr.trim()
-            );
-        }
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        anyhow::bail!(
+            "launchctl {} failed{}",
+            args.first().unwrap_or(&""),
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        );
     }
     Ok(())
 }
 
-fn uid() -> u32 {
-    // getuid without unsafe: read from the environment launchd sets, or
-    // fall back to `id -u`.
-    std::process::Command::new("id")
-        .arg("-u")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-        .unwrap_or(501)
+fn uid() -> anyhow::Result<u32> {
+    // No getuid without unsafe; `id -u` is the portable spelling.
+    let out = std::process::Command::new("id").arg("-u").output()?;
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("could not determine uid"))
 }
 
 fn plist() -> String {
     let bin = daemon_binary();
     let bin = bin.to_string_lossy();
-    let home = wukong_core::paths::home();
-    let log = home.join(".local/state/wukong/wukongd.log");
+    let log = wukong_core::paths::state_dir().join("wukongd.log");
     let log = log.to_string_lossy();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>

@@ -45,6 +45,14 @@ enum Command {
     },
     /// Push the store now.
     Push,
+    /// Copy stored files back to their live locations (new-machine
+    /// bootstrap). No path restores everything.
+    Restore {
+        path: Option<String>,
+        /// Overwrite live files that differ from the stored copy.
+        #[arg(long)]
+        force: bool,
+    },
     /// Manage the background daemon.
     Daemon {
         #[command(subcommand)]
@@ -78,6 +86,7 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Inbox) => inbox(),
         Some(Command::Resolve { id, resolution }) => say(Request::InboxResolve { id, resolution }),
         Some(Command::Push) => say(Request::PushNow),
+        Some(Command::Restore { path, force }) => say(Request::Restore { path, force }),
         Some(Command::Daemon { action }) => launchd::run(action),
         Some(Command::Doctor) => doctor(),
     }
@@ -156,13 +165,23 @@ fn inbox() -> anyhow::Result<()> {
 
 fn doctor() -> anyhow::Result<()> {
     use wukong_core::{Config, paths};
-    let config = Config::load();
     let check = |ok: bool, label: &str| println!("{} {label}", if ok { "✓" } else { "✗" });
 
-    check(
-        !config.machine.is_empty(),
-        "initialized (config.toml present)",
-    );
+    let config = match Config::load() {
+        Ok(Some(config)) => {
+            check(true, "config parses");
+            config
+        }
+        Ok(None) => {
+            check(false, "config missing — run `wukong init`");
+            Config::default()
+        }
+        Err(e) => {
+            check(false, &format!("config broken: {e}"));
+            Config::default()
+        }
+    };
+    check(!config.machine.is_empty(), "initialized (machine name set)");
     check(
         paths::store_dir().join(".git").exists(),
         "store repo exists",

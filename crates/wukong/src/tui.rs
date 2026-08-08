@@ -65,6 +65,14 @@ pub fn run() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // A panic mid-draw must not leave the user's terminal in raw mode.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = terminal::disable_raw_mode();
+        let _ = execute!(stdout(), terminal::LeaveAlternateScreen);
+        default_hook(info);
+    }));
+
     terminal::enable_raw_mode()?;
     execute!(stdout(), terminal::EnterAlternateScreen)?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout());

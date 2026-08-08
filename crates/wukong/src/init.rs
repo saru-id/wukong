@@ -1,31 +1,63 @@
 //! `wukong init`: make this machine ready. Detect its name, write the
-//! starter config, initialize the store repo, install the launchd
-//! agent, and start the daemon. Idempotent — safe to run again to
-//! repair a half-set-up machine.
+//! starter config, initialize the store repo — cloning the remote if
+//! one is given and no store exists yet, which is the whole new-machine
+//! bootstrap — install the launchd agent, and start the daemon.
+//! Idempotent: safe to run again to repair a half-set-up machine.
 
 use std::io::{self, Write as _};
 use wukong_core::{Config, Store, paths};
 
 pub fn run() -> anyhow::Result<()> {
-    let mut config = Config::load();
+    let mut config = match Config::load() {
+        Ok(Some(config)) => config,
+        Ok(None) => Config::default(),
+        Err(e) => anyhow::bail!("{e}\nfix the file (or delete it) and run `wukong init` again"),
+    };
     let fresh = config.machine.is_empty();
 
     if config.machine.is_empty() {
         config.machine = detect_machine();
     }
     if config.remote.is_empty() {
-        config.remote = prompt(&format!(
-            "Store remote (git URL, blank for local-only) [{}]: ",
-            suggested_remote(&config.machine)
-        ));
+        config.remote = prompt("Store remote (git URL; press Enter for local-only): ");
+        if !config.remote.is_empty() && !remote_reachable(&config.remote) {
+            println!(
+                "  note: could not reach {} right now — keeping it; pushes will retry",
+                config.remote
+            );
+        }
     }
     config.save()?;
     println!("✓ config at {}", paths::display(&paths::config_file()));
 
-    Store::open(&paths::store_dir(), &config.machine)?;
+    let store_dir = paths::store_dir();
+    if !store_dir.join(".git").exists() && !config.remote.is_empty() {
+        // A remote plus no local store = a new machine joining an
+        // existing store. Clone, branch off, and offer the restore.
+        match Store::clone_from(&config.remote, &store_dir, &config.machine) {
+            Ok(store) => {
+                let files = store.files().map(|f| f.len()).unwrap_or(0);
+                println!(
+                    "✓ cloned store from {} (branch {}, {files} file(s))",
+                    config.remote, config.machine
+                );
+                if files > 0 {
+                    println!("  bring them onto this machine with:  wukong restore");
+                }
+            }
+            Err(e) => {
+                // An empty or brand-new remote clones nothing — fall
+                // back to a fresh local store that will push to it.
+                println!("  note: clone failed ({e}); starting a fresh store");
+                Store::open(&store_dir, &config.machine)?;
+            }
+        }
+    } else {
+        Store::open(&store_dir, &config.machine)?;
+    }
     println!(
         "✓ store repo at {} (branch {})",
-        paths::display(&paths::store_dir()),
+        paths::display(&store_dir),
         config.machine
     );
 
@@ -55,8 +87,15 @@ fn detect_machine() -> String {
         .replace(' ', "-")
 }
 
-fn suggested_remote(_machine: &str) -> String {
-    "git@github.com:you/wukong-store.git".to_string()
+/// A quick, prompt-free reachability check; failure is advisory only
+/// (the machine may simply be offline right now).
+fn remote_reachable(remote: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["ls-remote", "--heads", remote])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn prompt(message: &str) -> String {
