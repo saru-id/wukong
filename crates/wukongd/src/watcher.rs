@@ -1,4 +1,4 @@
-//! The filesystem watcher: `notify` (FSEvents on macOS) feeds raw
+//! The filesystem watcher: `notify` (`FSEvents` on macOS) feeds raw
 //! change signals into an async channel. It is idle-cheap — the kernel
 //! wakes us only when something under a watched root actually moves.
 //! Debouncing and gating happen downstream in the engine; this module

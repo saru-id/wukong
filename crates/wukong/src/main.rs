@@ -153,7 +153,10 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Push) => say(Request::PushNow),
         Some(Command::Restore { path, force }) => say(Request::Restore { path, force }),
         Some(Command::Daemon { action }) => launchd::run(action),
-        Some(Command::Doctor) => doctor(),
+        Some(Command::Doctor) => {
+            doctor();
+            Ok(())
+        }
     }
 }
 
@@ -228,7 +231,7 @@ fn inbox() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn doctor() -> anyhow::Result<()> {
+fn doctor() {
     use wukong_core::{Config, paths};
     let check = |ok: bool, label: &str| println!("{} {label}", if ok { "✓" } else { "✗" });
 
@@ -262,7 +265,6 @@ fn doctor() -> anyhow::Result<()> {
             s.tracked, s.inbox, s.unpushed
         );
     }
-    Ok(())
 }
 
 fn human_secs(secs: u64) -> String {

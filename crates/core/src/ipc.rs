@@ -15,6 +15,7 @@ pub struct Envelope {
 }
 
 impl Envelope {
+    #[must_use]
     pub fn new(req: Request) -> Self {
         Self {
             v: PROTOCOL_VERSION,

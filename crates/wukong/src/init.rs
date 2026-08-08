@@ -36,7 +36,7 @@ pub fn run() -> anyhow::Result<()> {
         // existing store. Clone, branch off, and offer the restore.
         match Store::clone_from(&config.remote, &store_dir, &config.machine) {
             Ok(store) => {
-                let files = store.files().map(|f| f.len()).unwrap_or(0);
+                let files = store.files().map_or(0, |f| f.len());
                 println!(
                     "✓ cloned store from {} (branch {}, {files} file(s))",
                     config.remote, config.machine
@@ -94,8 +94,7 @@ fn remote_reachable(remote: &str) -> bool {
         .args(["ls-remote", "--heads", remote])
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 fn prompt(message: &str) -> String {

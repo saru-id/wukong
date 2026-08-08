@@ -1,11 +1,11 @@
-//! The daemon's memory: SQLite at `~/.local/share/wukong/wukong.db`.
+//! The daemon's memory: `SQLite` at `~/.local/share/wukong/wukong.db`.
 //! Three tables — the append-only event log, the tracked-file roster,
 //! and the inbox. Migrations are idempotent CREATEs; the schema is
 //! young enough to grow additively.
 
-use crate::events::{Event, InboxItem, Resolution};
+use crate::events::{Event, EventKind, InboxItem, InboxKind, Resolution};
 use rusqlite::{Connection, params};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -37,8 +37,7 @@ impl Db {
             );
             CREATE TABLE IF NOT EXISTS tracked (
                 path      TEXT PRIMARY KEY,
-                added_ts  TEXT NOT NULL,
-                last_hash TEXT NOT NULL DEFAULT ''
+                added_ts  TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS inbox (
                 id          INTEGER PRIMARY KEY,
@@ -82,10 +81,10 @@ impl Db {
 
     // ---- Events --------------------------------------------------------
 
-    pub fn record(&self, kind: &str, subject: &str, detail: &str) -> Result<(), DbError> {
+    pub fn record(&self, kind: EventKind, subject: &str, detail: &str) -> Result<(), DbError> {
         self.conn.execute(
             "INSERT INTO events (ts, kind, subject, detail) VALUES (?1, ?2, ?3, ?4)",
-            params![now(), kind, subject, detail],
+            params![now(), kind.as_str(), subject, detail],
         )?;
         Ok(())
     }
@@ -94,6 +93,7 @@ impl Db {
         let mut stmt = self
             .conn
             .prepare("SELECT ts, kind, subject, detail FROM events ORDER BY id DESC LIMIT ?1")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let rows = stmt.query_map(params![limit], |row| {
             Ok(Event {
                 ts: row.get(0)?,
@@ -138,29 +138,6 @@ impl Db {
         )? > 0)
     }
 
-    pub fn set_hash(&self, path: &str, hash: &str) -> Result<(), DbError> {
-        self.conn.execute(
-            "UPDATE tracked SET last_hash = ?2 WHERE path = ?1",
-            params![path, hash],
-        )?;
-        Ok(())
-    }
-
-    pub fn hash_of(&self, path: &str) -> Result<Option<String>, DbError> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT last_hash FROM tracked WHERE path = ?1",
-                params![path],
-                |row| row.get(0),
-            )
-            .map(Some)
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other),
-            })?)
-    }
-
     // ---- Allowances ----------------------------------------------------
 
     /// Record a sticky resolution for one finding: `approve` (the
@@ -190,10 +167,10 @@ impl Db {
     // Reconcile compares reality against this to fire offers only on
     // transitions; resolving/recording updates it.
 
-    pub fn pkg_state(&self, provider: &str) -> Result<Vec<String>, DbError> {
+    pub fn pkg_state(&self, provider: &str) -> Result<BTreeSet<String>, DbError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT name FROM pkg_state WHERE provider = ?1 ORDER BY name")?;
+            .prepare("SELECT name FROM pkg_state WHERE provider = ?1")?;
         let rows = stmt.query_map(params![provider], |row| row.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -218,14 +195,14 @@ impl Db {
     /// when an explicit CLI action supersedes a pending offer.
     pub fn inbox_resolve_open(
         &self,
-        kind: &str,
+        kind: InboxKind,
         subject: &str,
         resolution: Resolution,
     ) -> Result<bool, DbError> {
         Ok(self.conn.execute(
             "UPDATE inbox SET resolved = 1, resolution = ?3, resolved_ts = ?4
              WHERE kind = ?1 AND subject = ?2 AND resolved = 0",
-            params![kind, subject, resolution.as_str(), now()],
+            params![kind.as_str(), subject, resolution.as_str(), now()],
         )? > 0)
     }
 
@@ -237,7 +214,7 @@ impl Db {
     /// fingerprints as JSON so a resolution can persist them.
     pub fn inbox_add(
         &self,
-        kind: &str,
+        kind: InboxKind,
         subject: &str,
         detail: &str,
         body: &str,
@@ -246,7 +223,7 @@ impl Db {
         let updated = self.conn.execute(
             "UPDATE inbox SET ts = ?1, detail = ?2, body = ?3, meta = ?4
              WHERE kind = ?5 AND subject = ?6 AND resolved = 0",
-            params![now(), detail, body, meta, kind, subject],
+            params![now(), detail, body, meta, kind.as_str(), subject],
         )?;
         if updated > 0 {
             return Ok(InboxOutcome::Refreshed);
@@ -254,7 +231,7 @@ impl Db {
         self.conn.execute(
             "INSERT INTO inbox (ts, kind, subject, detail, body, meta)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![now(), kind, subject, detail, body, meta],
+            params![now(), kind.as_str(), subject, detail, body, meta],
         )?;
         Ok(InboxOutcome::New)
     }
@@ -279,11 +256,12 @@ impl Db {
     }
 
     pub fn inbox_count(&self) -> Result<usize, DbError> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM inbox WHERE resolved = 0", [], |row| {
-                row.get::<_, i64>(0)
-            })? as usize)
+        let n: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM inbox WHERE resolved = 0", [], |row| {
+                    row.get(0)
+                })?;
+        Ok(usize::try_from(n).unwrap_or(0))
     }
 
     pub fn inbox_get(&self, id: i64) -> Result<Option<InboxItem>, DbError> {
@@ -321,9 +299,7 @@ pub enum InboxOutcome {
 }
 
 fn now() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "unknown".to_string())
+    jiff::Timestamp::now().to_string()
 }
 
 #[cfg(test)]
@@ -340,10 +316,8 @@ mod tests {
         assert!(db.track(".zshrc").unwrap());
         assert!(!db.track(".zshrc").unwrap()); // idempotent
         assert!(db.is_tracked(".zshrc").unwrap());
-        db.set_hash(".zshrc", "abc").unwrap();
-        assert_eq!(db.hash_of(".zshrc").unwrap().as_deref(), Some("abc"));
         assert!(db.untrack(".zshrc").unwrap());
-        assert!(db.hash_of(".zshrc").unwrap().is_none());
+        assert!(!db.is_tracked(".zshrc").unwrap());
     }
 
     #[test]
@@ -389,13 +363,19 @@ mod tests {
     fn inbox_dedupes_open_items_by_subject() {
         let db = db();
         assert_eq!(
-            db.inbox_add("sentinel", ".zprofile", "changed", "v1", "")
+            db.inbox_add(InboxKind::Sentinel, ".zprofile", "changed", "v1", "")
                 .unwrap(),
             InboxOutcome::New
         );
         assert_eq!(
-            db.inbox_add("sentinel", ".zprofile", "changed again", "v2", "[\"fp1\"]")
-                .unwrap(),
+            db.inbox_add(
+                InboxKind::Sentinel,
+                ".zprofile",
+                "changed again",
+                "v2",
+                "[\"fp1\"]"
+            )
+            .unwrap(),
             InboxOutcome::Refreshed
         );
         let open = db.inbox_open().unwrap();
@@ -407,7 +387,7 @@ mod tests {
         assert_eq!(db.inbox_count().unwrap(), 0);
         // Resolved item stays resolved; a new change opens a new item.
         assert_eq!(
-            db.inbox_add("sentinel", ".zprofile", "later", "v3", "")
+            db.inbox_add(InboxKind::Sentinel, ".zprofile", "later", "v3", "")
                 .unwrap(),
             InboxOutcome::New
         );

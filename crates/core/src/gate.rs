@@ -139,6 +139,7 @@ static UUID: LazyLock<Regex> = LazyLock::new(|| {
 /// Scan file content before it may be mirrored and committed. Returns
 /// every finding on every line; the caller filters against its stored
 /// allowances.
+#[must_use]
 pub fn scan(path: &Path, content: &str) -> GateVerdict {
     let name = path
         .file_name()
@@ -218,9 +219,16 @@ fn overlaps(spans: &[(&str, usize, usize)], start: usize, end: usize) -> bool {
 /// Truncated SHA-256 of the secret text: stable across the file moving
 /// or the line shifting, distinct the moment the token rotates. The
 /// database stores this, never the secret.
+#[must_use]
 pub fn fingerprint(secret: &str) -> String {
+    use std::fmt::Write as _;
     let digest = Sha256::digest(secret.as_bytes());
-    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+    digest[..8]
+        .iter()
+        .fold(String::with_capacity(16), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
 }
 
 /// Does an assignment's value look like an actual secret rather than a
@@ -298,6 +306,7 @@ fn entropy_secret(token: &str) -> bool {
     if hex { h > 3.35 } else { h > 4.2 }
 }
 
+#[allow(clippy::cast_precision_loss)] // token lengths are far below 2^52
 fn shannon(s: &str) -> f64 {
     let mut counts = [0usize; 256];
     for b in s.bytes() {
@@ -369,6 +378,7 @@ pub fn mask_findings(
 /// Mask every secret the gate can see in a block of text — used before
 /// diffs or file excerpts are stored as inbox evidence, so the
 /// database never holds a raw secret.
+#[must_use]
 pub fn mask_all(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for line in text.lines() {

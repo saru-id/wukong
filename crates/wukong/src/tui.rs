@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tab
 use ratatui::{Frame, Terminal};
 use std::io::stdout;
 use std::time::{Duration, Instant};
-use wukong_core::events::Resolution;
+use wukong_core::events::{InboxKind, Resolution};
 use wukong_core::ipc::{PkgEntry, Request, Response, StatusInfo, TrackedFile};
 
 const GOLD: Color = Color::Rgb(0xE0, 0xA5, 0x2A);
@@ -174,17 +174,18 @@ impl App {
         self.selected = 0;
     }
 
-    fn cycle_tab(&mut self, delta: i32) {
-        let i = (self.tab.index() as i32 + delta).rem_euclid(Tab::ALL.len() as i32);
-        self.set_tab(Tab::ALL[i as usize]);
+    fn cycle_tab(&mut self, delta: isize) {
+        let n = Tab::ALL.len();
+        let i = (self.tab.index() + n).wrapping_add_signed(delta) % n;
+        self.set_tab(Tab::ALL[i]);
     }
 
-    fn move_selection(&mut self, delta: i32) {
+    fn move_selection(&mut self, delta: isize) {
         let len = self.list_len();
         if len == 0 {
             return;
         }
-        self.selected = (self.selected as i32 + delta).rem_euclid(len as i32) as usize;
+        self.selected = (self.selected + len).wrapping_add_signed(delta) % len;
     }
 
     fn resolve(&mut self, resolution: Resolution) {
@@ -227,7 +228,7 @@ impl App {
                     Tab::Inbox => self.data.inbox.len(),
                     Tab::Files => self.data.files.len(),
                     Tab::Packages => self.data.packages.len(),
-                    _ => 0,
+                    Tab::Activity => 0,
                 };
                 let label = if count > 0 {
                     format!(" {} {} ", t.title(), count)
@@ -282,14 +283,12 @@ impl App {
             .inbox
             .iter()
             .map(|item| {
-                let tag = match item.kind.as_str() {
-                    wukong_core::events::InboxKind::QUARANTINE => {
+                let tag = match item.kind() {
+                    Some(InboxKind::Quarantine) => {
                         Span::styled("secret ", Style::default().fg(Color::Red))
                     }
-                    wukong_core::events::InboxKind::PACKAGE => {
-                        Span::styled("adopt? ", Style::default().fg(GOLD))
-                    }
-                    wukong_core::events::InboxKind::PACKAGE_GONE => {
+                    Some(InboxKind::Package) => Span::styled("adopt? ", Style::default().fg(GOLD)),
+                    Some(InboxKind::PackageGone) => {
                         Span::styled("gone   ", Style::default().fg(Color::Red))
                     }
                     _ => Span::styled("track? ", Style::default().fg(GOLD)),
@@ -449,13 +448,14 @@ impl App {
             None => " connecting…".to_string(),
         };
         let hint = match self.tab {
-            Tab::Inbox => match self.data.inbox.get(self.selected).map(|i| i.kind.as_str()) {
-                Some(wukong_core::events::InboxKind::PACKAGE) => {
-                    "a adopt · i never ask again · q quit"
-                }
-                Some(wukong_core::events::InboxKind::PACKAGE_GONE) => {
-                    "a drop from manifest · i keep · q quit"
-                }
+            Tab::Inbox => match self
+                .data
+                .inbox
+                .get(self.selected)
+                .and_then(wukong_core::InboxItem::kind)
+            {
+                Some(InboxKind::Package) => "a adopt · i never ask again · q quit",
+                Some(InboxKind::PackageGone) => "a drop from manifest · i keep · q quit",
                 _ => "a approve · r redact · i ignore · 1-4 tabs · q quit",
             },
             _ => "j/k move · h/l tabs · R refresh · q quit",

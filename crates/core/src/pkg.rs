@@ -8,7 +8,7 @@
 //! stays human-editable and diff-clean.
 //!
 //! Detection never shells out to brew. A formula is a directory in the
-//! Cellar whose INSTALL_RECEIPT.json says `installed_on_request` — that
+//! Cellar whose `INSTALL_RECEIPT.json` says `installed_on_request` — that
 //! single bit separates what you asked for from the dependency chaff.
 //! Casks are Caskroom directories; apps are `.app` bundles in
 //! /Applications. All three are cheap directory reads, fit for a
@@ -32,6 +32,7 @@ pub enum Provider {
 }
 
 impl Provider {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Provider::Formula => "formula",
@@ -40,6 +41,7 @@ impl Provider {
         }
     }
 
+    #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "formula" => Some(Provider::Formula),
@@ -51,17 +53,19 @@ impl Provider {
 }
 
 /// `provider:name` — the inbox subject and event-log spelling.
+#[must_use]
 pub fn subject(provider: Provider, name: &str) -> String {
     format!("{}:{name}", provider.as_str())
 }
 
+#[must_use]
 pub fn parse_subject(s: &str) -> Option<(Provider, &str)> {
     let (p, name) = s.split_once(':')?;
     Some((Provider::parse(p)?, name))
 }
 
 /// The manifest: what this machine should have, and what it should
-/// never be asked about again. BTreeSets keep the file sorted so diffs
+/// never be asked about again. `BTreeSets` keep the file sorted so diffs
 /// stay one-line-per-change.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -81,6 +85,7 @@ pub struct Ignore {
 }
 
 impl Manifest {
+    #[must_use]
     pub fn load(store_dir: &Path) -> Self {
         std::fs::read_to_string(store_dir.join(MANIFEST_REL))
             .ok()
@@ -113,6 +118,7 @@ impl Manifest {
         }
     }
 
+    #[must_use]
     pub fn contains(&self, provider: Provider, name: &str) -> bool {
         match provider {
             Provider::Formula => self.formulae.contains(name),
@@ -121,6 +127,7 @@ impl Manifest {
         }
     }
 
+    #[must_use]
     pub fn ignored(&self, provider: Provider, name: &str) -> bool {
         match provider {
             Provider::Formula => self.ignore.formulae.contains(name),
@@ -150,6 +157,7 @@ impl Manifest {
         self.ignore_set(provider).remove(name)
     }
 
+    #[must_use]
     pub fn entries(&self) -> Vec<(Provider, String)> {
         let mut out = Vec::new();
         for n in &self.formulae {
@@ -190,13 +198,28 @@ impl PkgRoots {
             cellar: prefix.as_ref().and_then(|p| existing(p.join("Cellar"))),
             caskroom: prefix.as_ref().and_then(|p| existing(p.join("Caskroom"))),
             applications: existing(
-                applications_dir
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| PathBuf::from("/Applications")),
+                applications_dir.map_or_else(|| PathBuf::from("/Applications"), Path::to_path_buf),
             ),
         }
     }
 
+    /// Everything installed right now, per provider.
+    #[must_use]
+    pub fn installed(&self) -> Vec<(Provider, BTreeSet<String>)> {
+        let mut out = Vec::new();
+        if let Some(cellar) = &self.cellar {
+            out.push((Provider::Formula, installed_formulae(cellar)));
+        }
+        if let Some(caskroom) = &self.caskroom {
+            out.push((Provider::Cask, installed_casks(caskroom)));
+        }
+        if let Some(apps) = &self.applications {
+            out.push((Provider::App, installed_apps(apps)));
+        }
+        out
+    }
+
+    #[must_use]
     pub fn watch_roots(&self) -> Vec<PathBuf> {
         [&self.cellar, &self.caskroom, &self.applications]
             .into_iter()
@@ -214,6 +237,7 @@ struct Receipt {
 
 /// Formulae present in the Cellar that were installed on request —
 /// dependencies never surface. Reads receipts, shells nothing.
+#[must_use]
 pub fn installed_formulae(cellar: &Path) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let Ok(entries) = std::fs::read_dir(cellar) else {
@@ -242,11 +266,13 @@ pub fn installed_formulae(cellar: &Path) -> BTreeSet<String> {
 }
 
 /// Casks are Caskroom directories.
+#[must_use]
 pub fn installed_casks(caskroom: &Path) -> BTreeSet<String> {
     list_dirs(caskroom)
 }
 
 /// Apps are `.app` bundles, named without the extension.
+#[must_use]
 pub fn installed_apps(applications: &Path) -> BTreeSet<String> {
     let Ok(entries) = std::fs::read_dir(applications) else {
         return BTreeSet::new();

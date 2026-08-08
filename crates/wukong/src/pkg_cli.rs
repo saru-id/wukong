@@ -10,7 +10,7 @@ use wukong_core::ipc::{PkgEntry, Request, Response};
 use wukong_core::pkg::Provider;
 
 pub fn install(name: &str, cask: bool, no_track: bool) -> anyhow::Result<()> {
-    brew_run(if cask {
+    brew_run(&if cask {
         vec!["install", "--cask", name]
     } else {
         vec!["install", name]
@@ -19,16 +19,18 @@ pub fn install(name: &str, cask: bool, no_track: bool) -> anyhow::Result<()> {
         println!("installed {name} (not recorded — you opted out)");
         return Ok(());
     }
-    record(provider_of(cask), name, false)
+    record(provider_of(cask), name, false);
+    Ok(())
 }
 
 pub fn rm(name: &str, cask: bool) -> anyhow::Result<()> {
-    brew_run(if cask {
+    brew_run(&if cask {
         vec!["uninstall", "--cask", name]
     } else {
         vec!["uninstall", name]
     })?;
-    record(provider_of(cask), name, true)
+    record(provider_of(cask), name, true);
+    Ok(())
 }
 
 fn provider_of(cask: bool) -> Provider {
@@ -39,7 +41,7 @@ fn provider_of(cask: bool) -> Provider {
     }
 }
 
-fn record(provider: Provider, name: &str, remove: bool) -> anyhow::Result<()> {
+fn record(provider: Provider, name: &str, remove: bool) {
     let req = Request::PkgRecord {
         provider,
         name: name.to_string(),
@@ -54,13 +56,12 @@ fn record(provider: Provider, name: &str, remove: bool) -> anyhow::Result<()> {
              will offer {name} for adoption when it's back"
         ),
     }
-    Ok(())
 }
 
 /// Run brew with output streaming straight to the user's terminal.
-fn brew_run(args: Vec<&str>) -> anyhow::Result<()> {
+fn brew_run(args: &[&str]) -> anyhow::Result<()> {
     let status = std::process::Command::new("brew")
-        .args(&args)
+        .args(args)
         .status()
         .map_err(|_| anyhow::anyhow!("brew is not installed (https://brew.sh)"))?;
     if !status.success() {
@@ -117,7 +118,7 @@ pub fn sync(yes: bool) -> anyhow::Result<()> {
                 args.push("--cask");
             }
             args.push(&e.name);
-            brew_run(args)?;
+            brew_run(&args)?;
         }
         println!("installed {} package(s)", brewable.len());
     }

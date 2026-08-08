@@ -12,8 +12,10 @@ much later phase.
 
 ## Ground rules
 
-- Rust edition 2024, workspace lints (`unsafe_code = "forbid"`). Keep
-  clippy clean at default levels.
+- Rust edition 2024, workspace lints: `unsafe_code = "forbid"` and
+  **clippy pedantic as warn — keep it at zero warnings**. The few
+  allows in Cargo.toml and in code each carry a reason; add new ones
+  only with the same justification discipline.
 - `crates/core` stays free of the daemon and the socket — pure domain,
   tested with `cargo nextest`. The daemon and CLI compose it.
 - The **secret gate is load-bearing**: nothing reaches a commit without
@@ -30,8 +32,18 @@ much later phase.
 - **Binary files** (NUL in the first 8KB) pass the content gate — line
   rules over lossy text would spray entropy false positives. The
   forbidden-name layer still applies.
-- The engine (`wukongd/src/engine.rs`) is the single owner of all
-  mutable state. One writer, no shared locks. Keep it that way.
+- The engine (`wukongd/src/engine/`) is the single owner of all
+  mutable state — `mod.rs` for the file flow, `packages.rs` for the
+  reconcile machine, `tests.rs` for the tempdir suite. One writer, no
+  shared locks. Keep it that way.
+- The daemon loop speaks only typed `Request`s; JSON parsing and
+  encoding live at the edge in the client tasks. Signals become a
+  `Msg::Shutdown` like everything else — no `process::exit` inside
+  spawned tasks.
+- Non-fatal failures go through `soft()` (log to stderr, keep
+  governing) — never bare `let _ =` on a fallible governor operation.
+  Event/inbox kinds are real enums (`EventKind`, `InboxKind`); strings
+  exist only at the database boundary.
 - Conventional Commits. Leave work uncommitted unless asked.
 - Never use npm/yarn; there is no JS here.
 

@@ -21,6 +21,10 @@ pub enum StoreError {
     Git { args: String, stderr: String },
 }
 
+/// Distinguishes concurrent diff scratch files; pid alone is not
+/// unique enough (test threads, a future multi-engine world).
+static SCRATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Clone)]
 pub struct Store {
     dir: PathBuf,
@@ -81,10 +85,12 @@ impl Store {
         Ok(store)
     }
 
+    #[must_use]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
+    #[must_use]
     pub fn branch(&self) -> &str {
         &self.branch
     }
@@ -175,9 +181,6 @@ impl Store {
         if paths::ensure_private_dir(&state).is_err() {
             return String::new();
         }
-        // Pid alone is not unique enough: several threads (tests, a
-        // future multi-engine world) may diff at once.
-        static SCRATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = SCRATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp = state.join(format!("diff-scratch-{}-{n}", std::process::id()));
         if std::fs::write(&tmp, live_content).is_err() {
@@ -208,6 +211,7 @@ impl Store {
 
     /// Commits not yet on the remote branch; 0 when up to date or no
     /// upstream yet (the first push carries everything).
+    #[must_use]
     pub fn unpushed(&self, remote_configured: bool) -> usize {
         if !remote_configured {
             return 0;
@@ -249,23 +253,6 @@ impl Store {
     pub fn push(&self) -> Result<(), StoreError> {
         self.git(&["push", "-q", "-u", "origin", &self.branch])
             .map(drop)
-    }
-
-    /// Restore one stored file to its live location (bootstrap flow).
-    pub fn restore(&self, rel: &Path) -> Result<PathBuf, StoreError> {
-        let source = self.dir.join(rel);
-        let live = paths::from_store_rel(rel);
-        if let Some(dir) = live.parent() {
-            std::fs::create_dir_all(dir).map_err(|source| StoreError::Io {
-                path: dir.to_path_buf(),
-                source,
-            })?;
-        }
-        std::fs::copy(&source, &live).map_err(|source_err| StoreError::Io {
-            path: source.clone(),
-            source: source_err,
-        })?;
-        Ok(live)
     }
 }
 

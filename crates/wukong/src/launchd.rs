@@ -1,4 +1,4 @@
-//! The launchd LaunchAgent: keeps wukongd alive across logins without
+//! The launchd `LaunchAgent`: keeps wukongd alive across logins without
 //! a polling loop of its own. We write the plist, then drive it with
 //! `launchctl`. Bootout of a not-loaded agent is tolerated (that's the
 //! idempotent path); everything else fails loudly — a ✓ the user reads

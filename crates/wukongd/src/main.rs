@@ -5,6 +5,11 @@
 //! state; this file is just the event loop and the socket. The only
 //! work that leaves the loop is the network push, which runs on a
 //! blocking task so a slow remote can never wedge the governor.
+//!
+//! Client tasks parse and encode JSON at the edge; the loop itself
+//! speaks only typed `Request`s. Signals become a message like
+//! everything else, so shutdown is a normal exit from the loop with
+//! cleanup in one place.
 
 mod engine;
 mod notify_user;
@@ -24,17 +29,18 @@ enum Msg {
     Fs(std::path::PathBuf),
     Rescan,
     Client {
-        line: String,
-        reply: tokio::sync::oneshot::Sender<String>,
+        req: Request,
+        reply: tokio::sync::oneshot::Sender<Response>,
     },
     DebounceTick,
     PushTick,
     PushDone(Result<(), String>),
+    Shutdown,
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
-    let config = match Config::load() {
+/// Load the config or explain why the daemon cannot run.
+fn load_config_or_exit() -> Config {
+    match Config::load() {
         Ok(Some(config)) => config,
         Ok(None) => {
             eprintln!("wukongd: not initialized — run `wukong init` first");
@@ -44,7 +50,12 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("wukongd: {e}");
             std::process::exit(1);
         }
-    };
+    }
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> anyhow::Result<()> {
+    let config = load_config_or_exit();
 
     // Single instance: if a daemon already answers on the socket, this
     // one must not steal it — launchd KeepAlive plus a manual start
@@ -96,23 +107,23 @@ async fn main() -> anyhow::Result<()> {
                 let Ok((stream, _)) = listener.accept().await else {
                     continue;
                 };
-                tokio::spawn(handle_client(stream, tx.clone()));
+                tokio::spawn(serve_client(stream, tx.clone()));
             }
         });
     }
 
-    // Clean shutdown removes the socket.
+    // Signals are just another message; the loop exits and cleans up.
     {
-        let socket = socket.clone();
+        let tx = tx.clone();
         tokio::spawn(async move {
             let mut term =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("signal handler installs");
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {}
                 _ = term.recv() => {}
             }
-            let _ = std::fs::remove_file(&socket);
-            std::process::exit(0);
+            let _ = tx.send(Msg::Shutdown);
         });
     }
 
@@ -138,14 +149,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Msg::PushDone(result) => engine.finish_push(result),
-            Msg::Client { line, reply } => {
-                match parse(&line) {
-                    Ok(Request::PushNow) => handle_push_now(&mut engine, tx.clone(), reply),
-                    Ok(req) => {
-                        let _ = reply.send(encode(engine.handle(req)));
-                    }
-                    Err(response) => {
-                        let _ = reply.send(encode(*response));
+            Msg::Client { req, reply } => {
+                match req {
+                    Request::PushNow => handle_push_now(&mut engine, tx.clone(), reply),
+                    req => {
+                        let _ = reply.send(engine.handle(req));
                     }
                 }
                 // Tracking a new file asks the loop to watch its dir.
@@ -153,8 +161,11 @@ async fn main() -> anyhow::Result<()> {
                     fs_watcher.watch(&dir, false);
                 }
             }
+            Msg::Shutdown => break,
         }
     }
+
+    let _ = std::fs::remove_file(&socket);
     Ok(())
 }
 
@@ -164,7 +175,7 @@ async fn main() -> anyhow::Result<()> {
 fn start_push(
     engine: &mut Engine,
     tx: mpsc::UnboundedSender<Msg>,
-    reply: Option<tokio::sync::oneshot::Sender<String>>,
+    reply: Option<tokio::sync::oneshot::Sender<Response>>,
 ) {
     let store = engine.begin_push();
     tokio::task::spawn_blocking(move || {
@@ -178,7 +189,7 @@ fn start_push(
                     message: format!("push failed: {e}"),
                 },
             };
-            let _ = reply.send(encode(response));
+            let _ = reply.send(response);
         }
         let _ = tx.send(Msg::PushDone(result));
     });
@@ -187,24 +198,18 @@ fn start_push(
 fn handle_push_now(
     engine: &mut Engine,
     tx: mpsc::UnboundedSender<Msg>,
-    reply: tokio::sync::oneshot::Sender<String>,
+    reply: tokio::sync::oneshot::Sender<Response>,
 ) {
-    let response = if !engine.remote_configured() {
-        Some(Response::Error {
+    if !engine.remote_configured() {
+        let _ = reply.send(Response::Error {
             message: "no remote configured — set one in config.toml and restart".to_string(),
-        })
+        });
     } else if engine.push_in_flight() {
-        Some(Response::Ok {
+        let _ = reply.send(Response::Ok {
             message: "push already in progress".to_string(),
-        })
+        });
     } else {
-        None
-    };
-    match response {
-        Some(r) => {
-            let _ = reply.send(encode(r));
-        }
-        None => start_push(engine, tx, Some(reply)),
+        start_push(engine, tx, Some(reply));
     }
 }
 
@@ -224,6 +229,44 @@ where
     });
 }
 
+/// One connected client: JSON lines in, JSON lines out. Parsing and
+/// version checks happen here, at the edge — the loop never sees a
+/// malformed request.
+async fn serve_client(stream: tokio::net::UnixStream, tx: mpsc::UnboundedSender<Msg>) {
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let response = match parse(&line) {
+            Ok(req) => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .send(Msg::Client {
+                        req,
+                        reply: reply_tx,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                match reply_rx.await {
+                    Ok(response) => response,
+                    Err(_) => break,
+                }
+            }
+            Err(response) => *response,
+        };
+        let mut encoded = serde_json::to_string(&response)
+            .unwrap_or_else(|_| r#"{"res":"error","message":"encode failed"}"#.to_string());
+        encoded.push('\n');
+        if write.write_all(encoded.as_bytes()).await.is_err() {
+            break;
+        }
+    }
+}
+
 fn parse(line: &str) -> Result<Request, Box<Response>> {
     match serde_json::from_str::<Envelope>(line) {
         Ok(env) if env.v == PROTOCOL_VERSION => Ok(env.req),
@@ -233,35 +276,5 @@ fn parse(line: &str) -> Result<Request, Box<Response>> {
         Err(e) => Err(Box::new(Response::Error {
             message: format!("bad request: {e}"),
         })),
-    }
-}
-
-fn encode(response: Response) -> String {
-    serde_json::to_string(&response).unwrap_or_else(|_| "{\"res\":\"error\"}".to_string())
-}
-
-async fn handle_client(stream: tokio::net::UnixStream, tx: mpsc::UnboundedSender<Msg>) {
-    let (read, mut write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        if tx
-            .send(Msg::Client {
-                line,
-                reply: reply_tx,
-            })
-            .is_err()
-        {
-            break;
-        }
-        if let Ok(mut response) = reply_rx.await {
-            response.push('\n');
-            if write.write_all(response.as_bytes()).await.is_err() {
-                break;
-            }
-        }
     }
 }

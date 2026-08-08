@@ -10,7 +10,7 @@ use std::path::PathBuf;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// This machine's name — the store branch it pushes to. Defaults
-    /// to the ComputerName at init time.
+    /// to the `ComputerName` at init time.
     pub machine: String,
     /// Where the store pushes (empty = local-only, push disabled).
     pub remote: String,
@@ -36,17 +36,17 @@ pub struct Packages {
     /// Watch brew and /Applications, offer adoptions in the inbox.
     pub enabled: bool,
     /// Override the auto-detected Homebrew prefix (tests, odd setups).
-    pub brew_prefix: String,
+    pub brew_prefix: Option<PathBuf>,
     /// Override /Applications (tests).
-    pub applications_dir: String,
+    pub applications_dir: Option<PathBuf>,
 }
 
 impl Default for Packages {
     fn default() -> Self {
         Self {
             enabled: true,
-            brew_prefix: String::new(),
-            applications_dir: String::new(),
+            brew_prefix: None,
+            applications_dir: None,
         }
     }
 }
@@ -115,27 +115,23 @@ impl Config {
     /// Sentinel entries as canonical absolute paths — `/etc` is a
     /// symlink into `/private` on macOS, and the watcher reports real
     /// paths, so comparisons must happen on the canonical form.
+    #[must_use]
     pub fn sentinel_paths(&self) -> Vec<PathBuf> {
         expand_all(&self.sentinels)
     }
 
     /// Exclude entries, canonical like the sentinels.
+    #[must_use]
     pub fn exclude_paths(&self) -> Vec<PathBuf> {
         expand_all(&self.exclude)
     }
 
     /// Detector roots honoring config overrides.
+    #[must_use]
     pub fn pkg_roots(&self) -> crate::pkg::PkgRoots {
-        let opt = |s: &str| {
-            if s.is_empty() {
-                None
-            } else {
-                Some(PathBuf::from(s))
-            }
-        };
         crate::pkg::PkgRoots::detect(
-            opt(&self.packages.brew_prefix).as_deref(),
-            opt(&self.packages.applications_dir).as_deref(),
+            self.packages.brew_prefix.as_deref(),
+            self.packages.applications_dir.as_deref(),
         )
     }
 }

@@ -1,6 +1,7 @@
 //! The shared shapes: log events, inbox items, and how an inbox item
-//! can be resolved. String-typed kinds keep the schema additive; the
-//! constants below are the vocabulary both binaries speak.
+//! can be resolved. Kinds are real enums on the write side; rows read
+//! back from the database carry the string form, so old rows with
+//! kinds a newer binary no longer emits still display fine.
 
 use serde::{Deserialize, Serialize};
 
@@ -12,27 +13,50 @@ pub struct Event {
     pub detail: String,
 }
 
-/// Event kinds written to the log.
-pub mod kind {
-    pub const DAEMON_STARTED: &str = "daemon-started";
-    pub const TRACKED: &str = "tracked";
-    pub const UNTRACKED: &str = "untracked";
-    pub const COMMITTED: &str = "committed";
-    pub const PUSHED: &str = "pushed";
-    pub const QUARANTINED: &str = "quarantined";
-    pub const SENTINEL: &str = "sentinel-changed";
-    pub const RESOLVED: &str = "inbox-resolved";
-    pub const PUSH_FAILED: &str = "push-failed";
-    pub const RESTORED: &str = "restored";
-    pub const HELD: &str = "held";
-    pub const PKG_INSTALLED: &str = "pkg-installed";
-    pub const PKG_REMOVED: &str = "pkg-removed";
-    pub const PKG_ADOPTED: &str = "pkg-adopted";
-    pub const PKG_IGNORED: &str = "pkg-ignored";
-    pub const PKG_GONE: &str = "pkg-gone";
+/// Everything the governor writes to its log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventKind {
+    DaemonStarted,
+    Tracked,
+    Untracked,
+    Committed,
+    Pushed,
+    PushFailed,
+    Quarantined,
+    SentinelChanged,
+    Resolved,
+    Restored,
+    Held,
+    PkgInstalled,
+    PkgRemoved,
+    PkgAdopted,
+    PkgIgnored,
+    PkgGone,
 }
 
-pub use kind as EventKind;
+impl EventKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DaemonStarted => "daemon-started",
+            Self::Tracked => "tracked",
+            Self::Untracked => "untracked",
+            Self::Committed => "committed",
+            Self::Pushed => "pushed",
+            Self::PushFailed => "push-failed",
+            Self::Quarantined => "quarantined",
+            Self::SentinelChanged => "sentinel-changed",
+            Self::Resolved => "inbox-resolved",
+            Self::Restored => "restored",
+            Self::Held => "held",
+            Self::PkgInstalled => "pkg-installed",
+            Self::PkgRemoved => "pkg-removed",
+            Self::PkgAdopted => "pkg-adopted",
+            Self::PkgIgnored => "pkg-ignored",
+            Self::PkgGone => "pkg-gone",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboxItem {
@@ -50,49 +74,82 @@ pub struct InboxItem {
     pub meta: String,
 }
 
-/// Inbox item kinds.
-pub mod inbox_kind {
-    /// A tracked file's change was held by the secret gate.
-    pub const QUARANTINE: &str = "quarantine";
-    /// An untracked sentinel changed — track it?
-    pub const SENTINEL: &str = "sentinel";
-    /// A package appeared outside wukong — adopt it? (For package
-    /// items, `ignore` is PERMANENT: it lands on the manifest's
-    /// ignore list and the package is never offered again.)
-    pub const PACKAGE: &str = "package";
-    /// A manifest package vanished outside wukong — drop it?
-    pub const PACKAGE_GONE: &str = "package-gone";
+impl InboxItem {
+    /// The typed kind, when this binary knows it.
+    #[must_use]
+    pub fn kind(&self) -> Option<InboxKind> {
+        InboxKind::parse(&self.kind)
+    }
 }
 
-pub use inbox_kind as InboxKind;
+/// What an inbox item is asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboxKind {
+    /// A tracked file's change was held by the secret gate.
+    Quarantine,
+    /// An untracked sentinel changed — track it?
+    Sentinel,
+    /// A package appeared outside wukong — adopt it? (`ignore` on
+    /// package items is PERMANENT: it lands on the manifest's ignore
+    /// list and the package is never offered again.)
+    Package,
+    /// A manifest package vanished outside wukong — drop it?
+    PackageGone,
+}
+
+impl InboxKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Quarantine => "quarantine",
+            Self::Sentinel => "sentinel",
+            Self::Package => "package",
+            Self::PackageGone => "package-gone",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "quarantine" => Some(Self::Quarantine),
+            "sentinel" => Some(Self::Sentinel),
+            "package" => Some(Self::Package),
+            "package-gone" => Some(Self::PackageGone),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Resolution {
-    /// Quarantine: commit as-is. Sentinel: start tracking.
+    /// Quarantine: commit as-is, forever (fingerprint allowance).
+    /// Sentinel: start tracking. Package: adopt into the manifest.
     Approve,
-    /// Quarantine only: commit with the findings masked in the stored
-    /// copy; the live file is never touched.
+    /// Quarantine only: mask the finding in every stored copy, forever;
+    /// the live file is never touched.
     Redact,
-    /// Drop the item; for sentinels, stop suggesting until it changes
-    /// again.
+    /// Quarantine/sentinel: drop the item; it may return when the file
+    /// next changes. Package: PERMANENT opt-out via the manifest.
     Ignore,
 }
 
 impl Resolution {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            Resolution::Approve => "approve",
-            Resolution::Redact => "redact",
-            Resolution::Ignore => "ignore",
+            Self::Approve => "approve",
+            Self::Redact => "redact",
+            Self::Ignore => "ignore",
         }
     }
 
+    #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "approve" => Some(Resolution::Approve),
-            "redact" => Some(Resolution::Redact),
-            "ignore" => Some(Resolution::Ignore),
+            "approve" => Some(Self::Approve),
+            "redact" => Some(Self::Redact),
+            "ignore" => Some(Self::Ignore),
             _ => None,
         }
     }
