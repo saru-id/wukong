@@ -98,3 +98,6 @@ database in `~/.local/share/wukong`, the socket in `~/.local/state`.
 cargo nextest run
 cargo clippy --workspace --all-targets
 ```
+
+CI runs fmt, clippy (pedantic, warnings-as-errors), and the full test
+suite — including the gate's property tests — on every push.
