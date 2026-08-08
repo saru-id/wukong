@@ -9,6 +9,7 @@
 //! roster and the precomputed sentinel lists — never the database.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use wukong_core::db::InboxOutcome;
@@ -399,7 +400,7 @@ impl Engine {
         // Audit trail: allow-marked lines carry exempted secrets.
         let allowed = gate::allow_marker_count(content);
         if allowed > 0 {
-            summary.push_str(&format!(" ({allowed} allow-marked)"));
+            let _ = write!(summary, " ({allowed} allow-marked)");
         }
         let rel_path = match self.store.mirror_in(path, &stored) {
             Ok(rel_path) => rel_path,
@@ -822,7 +823,7 @@ impl Engine {
         }
         let mut message = format!("restored {restored} file(s)");
         if !skipped.is_empty() {
-            message.push_str(&format!("\nskipped:\n  {}", skipped.join("\n  ")));
+            let _ = write!(message, "\nskipped:\n  {}", skipped.join("\n  "));
         }
         Response::Ok { message }
     }
@@ -854,10 +855,10 @@ fn change_summary(store: &Store, path: &Path, new_stored: &str) -> String {
 fn quarantine_body(findings: &[&Finding], diff: &str) -> String {
     let mut body = String::from("Held by the secret gate:\n");
     for f in findings.iter().take(20) {
-        body.push_str(&format!("  line {}: {} — {}\n", f.line, f.rule, f.excerpt));
+        let _ = writeln!(body, "  line {}: {} — {}", f.line, f.rule, f.excerpt);
     }
     if findings.len() > 20 {
-        body.push_str(&format!("  (… and {} more)\n", findings.len() - 20));
+        let _ = writeln!(body, "  (… and {} more)", findings.len() - 20);
     }
     body.push('\n');
     // The diff is evidence, so it is masked — the database and the TUI
