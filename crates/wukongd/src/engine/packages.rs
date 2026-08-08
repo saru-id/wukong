@@ -48,6 +48,13 @@ impl Engine {
         }
         let current = self.pkg_roots.installed();
         self.pkg_installed.clone_from(&current);
+        // With the on-disk manifest unparseable, offers would judge
+        // reality against an empty stand-in and mis-fire for every real
+        // manifest member. Keep pkg_state untouched too, so the missed
+        // transitions replay once the manifest is fixed.
+        if self.manifest_poisoned {
+            return 0;
+        }
         // A pour in progress (formula dir, no receipt yet) means the
         // interesting event — the receipt — will land too deep for the
         // watch. Re-arm so the next ticks re-check, bounded so a
@@ -193,8 +200,10 @@ impl Engine {
                 soft(self.db.record(EventKind::Committed, "packages", summary));
                 self.last_commit = Some(sha);
                 self.commits += 1;
-                self.unpushed += 1;
-                self.dirty = true;
+                if self.remote_configured() {
+                    self.unpushed += 1;
+                    self.dirty = true;
+                }
             }
             Ok(None) => {}
             Err(e) => soft(Err::<(), _>(e)),
@@ -209,6 +218,19 @@ impl Engine {
         observe_only: bool,
     ) -> Response {
         let subject = pkg::subject(provider, name);
+        // Keep the pkg_list cache honest immediately — the reconcile
+        // that confirms this install arrives a debounce later.
+        if let Some((_, set)) = self.pkg_installed.iter_mut().find(|(p, _)| *p == provider) {
+            if remove {
+                set.remove(name);
+            } else {
+                set.insert(name.to_string());
+            }
+        } else if !remove {
+            let mut set = BTreeSet::new();
+            set.insert(name.to_string());
+            self.pkg_installed.push((provider, set));
+        }
         if observe_only {
             // --no-track: acknowledge reality so the watcher does not
             // offer this install for adoption, but keep the manifest

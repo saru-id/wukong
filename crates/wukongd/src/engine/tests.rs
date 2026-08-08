@@ -331,3 +331,111 @@ fn restore_round_trips_and_tracks() {
     );
     assert!(rig.engine.tracked_live.contains(&file));
 }
+
+#[test]
+fn missing_sentinel_promoted_to_dir_requests_recursive_watch() {
+    // A sentinel that doesn't exist at startup classifies as a file;
+    // when it materializes as a DIRECTORY, touch() must promote it and
+    // ask the loop for a recursive watch — this is the request the
+    // daemon must drain on non-client messages too.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    let watched = root.join("home/appsupport");
+    let config = Config {
+        machine: "testbox".to_string(),
+        debounce_secs: 0,
+        sentinels: vec![watched.to_string_lossy().into_owned()],
+        ..Config::default()
+    };
+    let mut engine = Engine::new(config, &root.join("wukong.db"), &root.join("store")).unwrap();
+    assert!(engine.sentinel_files.contains(&watched));
+
+    std::fs::create_dir_all(&watched).unwrap();
+    engine.touch(watched.clone());
+    let requests = engine.drain_watch_requests();
+    assert_eq!(requests, vec![(watched.clone(), true)]);
+    assert!(engine.sentinel_dirs.contains(&watched));
+
+    // And children are governed from now on: a file inside is offered.
+    let inside = watched.join("config.txt");
+    std::fs::write(&inside, "hello\n").unwrap();
+    engine.touch(inside);
+    assert_eq!(engine.tick(), 1);
+    assert_eq!(
+        engine.db.inbox_open().unwrap()[0].kind(),
+        Some(InboxKind::Sentinel)
+    );
+}
+
+#[test]
+fn observe_only_acknowledges_without_manifest() {
+    let mut rig = pkg_rig();
+    rig.engine.reconcile();
+    brew_install(&rig, "jq", true);
+    // `wukong install --no-track jq`: reality acknowledged, manifest
+    // untouched, and no later adoption offer for it.
+    rig.engine.pkg_record(Provider::Formula, "jq", false, true);
+    assert!(!rig.engine.manifest.contains(Provider::Formula, "jq"));
+    assert_eq!(rig.engine.reconcile(), 0);
+    assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
+}
+
+#[test]
+fn reverse_transition_auto_resolves_stale_offer() {
+    let mut rig = pkg_rig();
+    rig.engine.reconcile();
+    brew_install(&rig, "fd", true);
+    rig.engine.reconcile();
+    assert_eq!(rig.engine.db.inbox_count().unwrap(), 1); // adopt offer
+    // Uninstalled before the user ever resolved it: the offer must not
+    // linger — approving a ghost would adopt a missing package.
+    brew_uninstall(&rig, "fd");
+    rig.engine.reconcile();
+    assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
+}
+
+#[test]
+fn oversized_tracked_file_never_commits() {
+    let mut rig = rig();
+    let file = track(&mut rig, ".zshrc", "export A=1\n");
+    let huge = "x".repeat(MAX_TRACKED_BYTES + 1);
+    assert_eq!(edit_and_settle(&mut rig, &file, &huge), 0);
+    // The mirror still holds the last good content.
+    assert_eq!(store_content(&rig, &file).as_deref(), Some("export A=1\n"));
+}
+
+#[test]
+fn poisoned_manifest_blocks_offers_and_saves() {
+    let rig = pkg_rig();
+    // Corrupt the on-disk manifest, then rebuild the engine over it.
+    let store_dir = rig.engine.store.dir().to_path_buf();
+    let manifest_path = store_dir.join(wukong_core::pkg::MANIFEST_REL);
+    std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+    std::fs::write(&manifest_path, "this is [not toml").unwrap();
+    let db_path = rig.home.join("wukong2.db");
+    let mut engine = Engine::new(rig.engine.config.clone(), &db_path, &store_dir).unwrap();
+
+    // New package appears: no offer while poisoned, transition kept.
+    brew_install(&rig, "ripgrep", true);
+    assert_eq!(engine.reconcile(), 0);
+    assert_eq!(engine.db.inbox_count().unwrap(), 0);
+    // And a record attempt must not clobber the unparseable file.
+    engine.pkg_record(Provider::Formula, "ripgrep", false, false);
+    assert_eq!(
+        std::fs::read_to_string(&manifest_path).unwrap(),
+        "this is [not toml"
+    );
+}
+
+#[test]
+fn local_only_config_reports_zero_unpushed() {
+    let mut rig = rig(); // no remote configured
+    let file = track(&mut rig, ".zshrc", "export A=1\n");
+    edit_and_settle(&mut rig, &file, "export A=1\nexport B=2\n");
+    let Response::Status(status) = rig.engine.status() else {
+        panic!("expected status");
+    };
+    assert_eq!(status.unpushed, 0, "local-only must not count unpushed");
+    assert!(!rig.engine.wants_push());
+}

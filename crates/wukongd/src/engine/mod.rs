@@ -491,8 +491,12 @@ impl Engine {
         soft(self.db.record(EventKind::Committed, rel, summary));
         self.last_commit = Some(sha.to_string());
         self.commits += 1;
-        self.unpushed += 1;
-        self.dirty = true;
+        // "Unpushed" only means something when there is somewhere to
+        // push; a local-only config would otherwise count forever.
+        if self.remote_configured() {
+            self.unpushed += 1;
+            self.dirty = true;
+        }
     }
 
     // ---- Push (runs off-loop; the engine only tracks state) ------------
@@ -893,15 +897,18 @@ fn truncate_body(text: &str) -> String {
 }
 
 /// Restored files come back owner-only: dotfiles default private.
+/// `mode` in `OpenOptions` applies only when the file is created, so a
+/// forced overwrite of an existing file sets permissions explicitly.
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     file.write_all(bytes)
 }
 

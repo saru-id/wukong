@@ -70,9 +70,15 @@ async fn main() -> anyhow::Result<()> {
         .truncate(false)
         .write(true)
         .open(socket.with_extension("lock"))?;
-    if lock.try_lock().is_err() {
-        eprintln!("wukongd: another instance is already running");
-        std::process::exit(1);
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            eprintln!("wukongd: another instance is already running");
+            std::process::exit(1);
+        }
+        Err(std::fs::TryLockError::Error(e)) => {
+            return Err(anyhow::anyhow!("cannot take the instance lock: {e}"));
+        }
     }
 
     let mut engine = Engine::new(config, &paths::db_file(), &paths::store_dir())?;
@@ -161,13 +167,16 @@ async fn main() -> anyhow::Result<()> {
                         let _ = reply.send(engine.handle(req));
                     }
                 }
-                // Tracking a new file (or promoting a sentinel dir)
-                // asks the loop to watch it.
-                for (dir, recursive) in engine.drain_watch_requests() {
-                    fs_watcher.watch(&dir, recursive);
-                }
             }
             Msg::Shutdown => break,
+        }
+        // Watch requests come from client commands AND from the engine's
+        // own event handling — a sentinel promoted to a directory during
+        // `touch`, Homebrew appearing during a reconcile tick. Drain
+        // after every message, not just client ones, or those wait for
+        // the next CLI invocation to be watched (free when empty).
+        for (dir, recursive) in engine.drain_watch_requests() {
+            fs_watcher.watch(&dir, recursive);
         }
     }
 

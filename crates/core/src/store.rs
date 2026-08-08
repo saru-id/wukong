@@ -317,6 +317,9 @@ impl Store {
                 "GIT_SSH_COMMAND",
                 "ssh -o BatchMode=yes -o ConnectTimeout=30",
             )
+            // stderr is drained only after exit; a push emitting more than
+            // the ~64KB pipe buffer would stall and be killed as a
+            // timeout. git push stderr is far below that in practice.
             .stderr(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .spawn()
