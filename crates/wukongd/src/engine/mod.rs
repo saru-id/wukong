@@ -85,7 +85,13 @@ pub struct Engine {
     settings_poisoned: bool,
     prefs_dir: Option<PathBuf>,
     settings_dirty: Option<Instant>,
+    /// An in-flight capture snapshot: every top-level scalar pref key,
+    /// held in memory only, consumed by the diff.
+    capture: Option<(Instant, PrefsSnapshot)>,
 }
+
+/// Every (domain, key) → scalar value at one moment in time.
+type PrefsSnapshot = std::collections::BTreeMap<(String, String), wukong_core::settings::Value>;
 
 impl Engine {
     /// Paths are injected so tests can run an engine against a tempdir.
@@ -185,6 +191,7 @@ impl Engine {
             settings_poisoned,
             prefs_dir,
             settings_dirty: None,
+            capture: None,
         })
     }
 
@@ -632,6 +639,8 @@ impl Engine {
                 key,
                 unignore,
             } => self.settings_ignore(&domain, &key, unignore),
+            Request::SettingsCaptureStart => self.capture_start(),
+            Request::SettingsCaptureDiff => self.capture_diff(),
             Request::Exclude { path } => self.exclude(&path),
             Request::Diff { path } => self.diff(&path),
             Request::FileLog { path, limit } => self.file_log(&path, limit),

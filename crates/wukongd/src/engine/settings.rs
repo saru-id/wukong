@@ -7,12 +7,21 @@ use super::{Engine, refreshed, soft};
 use std::collections::BTreeSet;
 use wukong_core::db::InboxOutcome;
 use wukong_core::events::{EventKind, InboxKind, Resolution};
-use wukong_core::ipc::{Response, SettingEntry};
+use wukong_core::ipc::{CaptureChange, Response, SettingEntry};
 use wukong_core::settings::{self, Value};
 
 /// Pseudo-domain marking that the first settings reconcile has run;
 /// real domains contain dots or are `NSGlobalDomain`, so no collision.
 const BASELINE: &str = "__meta__";
+
+/// A capture snapshot older than this answers with an error — diffing
+/// against a stale world would attribute hours of churn to one click.
+#[allow(clippy::duration_suboptimal_units)] // Duration::from_mins is unstable
+const CAPTURE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// A diff bigger than this is not "one setting changed"; cap the
+/// response and say so.
+const CAPTURE_MAX_CHANGES: usize = 200;
 
 /// What a quarantined-change offer carries so resolve can act exactly
 /// on what was offered.
@@ -123,6 +132,65 @@ impl Engine {
             )
             .unwrap_or_else(refreshed);
         usize::from(outcome == InboxOutcome::New)
+    }
+
+    /// Capture phase 1: snapshot every top-level scalar key across
+    /// every preference domain, in memory only.
+    pub(super) fn capture_start(&mut self) -> Response {
+        let Some(prefs_dir) = self.prefs_dir.clone() else {
+            return Response::Error {
+                message: "settings governance is disabled in config".to_string(),
+            };
+        };
+        let snapshot = settings::read_all(&prefs_dir);
+        let domains: std::collections::BTreeSet<&str> =
+            snapshot.keys().map(|(d, _)| d.as_str()).collect();
+        let message = format!(
+            "snapshotted {} keys across {} domains",
+            snapshot.len(),
+            domains.len()
+        );
+        self.capture = Some((std::time::Instant::now(), snapshot));
+        Response::Ok { message }
+    }
+
+    /// Capture phase 2: diff reality against the snapshot, classify
+    /// noise, consume the snapshot.
+    pub(super) fn capture_diff(&mut self) -> Response {
+        let Some(prefs_dir) = self.prefs_dir.clone() else {
+            return Response::Error {
+                message: "settings governance is disabled in config".to_string(),
+            };
+        };
+        let Some((taken, snapshot)) = self.capture.take() else {
+            return Response::Error {
+                message: "no capture in progress — start with `wukong settings capture`"
+                    .to_string(),
+            };
+        };
+        if taken.elapsed() > CAPTURE_TTL {
+            return Response::Error {
+                message: "capture snapshot expired (10 minutes) — start again".to_string(),
+            };
+        }
+        let now = settings::read_all(&prefs_dir);
+        let mut changes = Vec::new();
+        for (id, after) in &now {
+            let before = snapshot.get(id);
+            if before.is_some_and(|b| b.matches(after)) {
+                continue;
+            }
+            changes.push(change(id, before.cloned(), Some(after.clone())));
+        }
+        for (id, before) in &snapshot {
+            if !now.contains_key(id) {
+                changes.push(change(id, Some(before.clone()), None));
+            }
+        }
+        // Signal first, then alphabetical; bounded.
+        changes.sort_by(|a, b| (a.noise, &a.domain, &a.key).cmp(&(b.noise, &b.domain, &b.key)));
+        changes.truncate(CAPTURE_MAX_CHANGES);
+        Response::CaptureDiff { changes }
     }
 
     /// Setting inbox items: approve records the offered value into the
@@ -253,6 +321,7 @@ impl Engine {
         }
     }
 
+    #[allow(clippy::used_underscore_items)]
     pub(super) fn settings_ignore(&mut self, domain: &str, key: &str, unignore: bool) -> Response {
         let subject = format!("{domain} {key}");
         if unignore {
@@ -305,5 +374,18 @@ impl Engine {
             Ok(None) => {}
             Err(e) => soft(Err::<(), _>(e)),
         }
+    }
+}
+
+/// Build one classified capture change.
+fn change(id: &(String, String), before: Option<Value>, after: Option<Value>) -> CaptureChange {
+    let (domain, key) = id;
+    CaptureChange {
+        noise: settings::is_noise_key(domain, key),
+        label: settings::known(domain, key).map(|k| k.label.to_string()),
+        domain: domain.clone(),
+        key: key.clone(),
+        before,
+        after,
     }
 }

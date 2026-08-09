@@ -6,7 +6,8 @@
 
 use crate::client;
 use std::collections::BTreeSet;
-use wukong_core::ipc::{Request, Response, SettingEntry};
+use std::io::Write as _;
+use wukong_core::ipc::{CaptureChange, Request, Response, SettingEntry};
 
 fn fetch() -> anyhow::Result<(Vec<SettingEntry>, Option<String>)> {
     match client::call(Request::SettingsList)? {
@@ -153,4 +154,142 @@ pub fn ignore(domain: &str, key: &str, unignore: bool) -> anyhow::Result<()> {
         key: key.to_string(),
         unignore,
     })
+}
+
+/// Which half of the capture flow to run — the phases are mutually
+/// exclusive, so they are an enum, not a pile of bools.
+pub enum CapturePhase {
+    /// Snapshot, wait for Enter, diff, offer to record.
+    Interactive,
+    /// Snapshot only (scripting).
+    Start,
+    /// Diff against the snapshot (scripting).
+    Diff,
+}
+
+/// The capture flow.
+pub fn capture(phase: &CapturePhase, all: bool, json: bool) -> anyhow::Result<()> {
+    match phase {
+        CapturePhase::Start => return say_start(),
+        CapturePhase::Diff => {
+            let changes = fetch_diff()?;
+            return present(&changes, all, json).map(|_| ());
+        }
+        CapturePhase::Interactive => {}
+    }
+    say_start()?;
+    println!("Change the setting now (System Settings, defaults, anywhere).");
+    print!("Press Enter to diff… ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let changes = fetch_diff()?;
+    let recordable = present(&changes, all, json)?;
+    if json || recordable.is_empty() {
+        return Ok(());
+    }
+    print!("Record which? [a = all / Enter = none / numbers like 1,3]: ");
+    std::io::stdout().flush()?;
+    let mut pick = String::new();
+    std::io::stdin().read_line(&mut pick)?;
+    let pick = pick.trim();
+    let chosen: Vec<&CaptureChange> = if pick.is_empty() {
+        Vec::new()
+    } else if pick == "a" {
+        recordable.clone()
+    } else {
+        pick.split(',')
+            .filter_map(|n| n.trim().parse::<usize>().ok())
+            .filter_map(|n| recordable.get(n.wrapping_sub(1)).copied())
+            .collect()
+    };
+    if chosen.is_empty() {
+        println!("nothing recorded");
+        return Ok(());
+    }
+    for c in chosen {
+        match client::call(Request::SettingsRecord {
+            domain: c.domain.clone(),
+            key: c.key.clone(),
+        })? {
+            Response::Ok { message } => println!("{message}"),
+            Response::Error { message } => eprintln!("  skipped: {message}"),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn say_start() -> anyhow::Result<()> {
+    match client::call(Request::SettingsCaptureStart)? {
+        Response::Ok { message } => {
+            println!("{message}");
+            Ok(())
+        }
+        Response::Error { message } => anyhow::bail!(message),
+        _ => anyhow::bail!("unexpected response"),
+    }
+}
+
+fn fetch_diff() -> anyhow::Result<Vec<CaptureChange>> {
+    match client::call(Request::SettingsCaptureDiff)? {
+        Response::CaptureDiff { changes } => Ok(changes),
+        Response::Error { message } => anyhow::bail!(message),
+        _ => anyhow::bail!("unexpected response"),
+    }
+}
+
+/// Print the diff; return the numbered, recordable signal entries.
+fn present(
+    changes: &[CaptureChange],
+    all: bool,
+    json: bool,
+) -> anyhow::Result<Vec<&CaptureChange>> {
+    if json {
+        let shown: Vec<&CaptureChange> = changes.iter().filter(|c| all || !c.noise).collect();
+        println!("{}", serde_json::to_string_pretty(&shown)?);
+        return Ok(Vec::new());
+    }
+    let noise_count = changes.iter().filter(|c| c.noise).count();
+    let mut recordable = Vec::new();
+    for c in changes {
+        if c.noise && !all {
+            continue;
+        }
+        let fmt_value = |v: &Option<wukong_core::settings::Value>| {
+            v.as_ref()
+                .map_or_else(|| "(unset)".to_string(), ToString::to_string)
+        };
+        let tag = if c.noise { " (noise)" } else { "" };
+        if c.after.is_some() && !c.noise {
+            recordable.push(c);
+            println!(
+                "{:2}. {} {}: {} → {}{}  {}",
+                recordable.len(),
+                c.domain,
+                c.key,
+                fmt_value(&c.before),
+                fmt_value(&c.after),
+                tag,
+                c.label.as_deref().unwrap_or("")
+            );
+        } else {
+            println!(
+                "    {} {}: {} → {}{}",
+                c.domain,
+                c.key,
+                fmt_value(&c.before),
+                fmt_value(&c.after),
+                tag
+            );
+        }
+    }
+    if recordable.is_empty() && !all {
+        println!(
+            "no setting changes detected ({noise_count} noisy change(s) filtered — --all shows them)"
+        );
+    } else if noise_count > 0 && !all {
+        println!("({noise_count} noisy change(s) filtered — --all shows them)");
+    }
+    Ok(recordable)
 }

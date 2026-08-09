@@ -121,6 +121,12 @@ application that may sit nearby on disk as `../wukong-backup`).
   live in `settings::Value::matches` — compare with it, never with
   `==`. The corpus (crates/core/src/settings.rs) carries label and
   restart knowledge only; desired values live in the manifest.
+- **Capture is bounded and one-shot.** The snapshot lives only in
+  daemon memory, expires after 10 minutes, and is consumed by the
+  diff. The noise filter (settings.rs NOISE_*) is curated and tested
+  against the whole corpus — every corpus key must classify as signal;
+  when adding markers, anchor on the chaff form ("NSToolbar
+  Configuration", not "NSToolbar") or real settings get eaten.
 - **The manifest is store state, not a live file.** It lives at
   `__wukong__/packages.toml` inside the store repo; `restore` must
   skip the `__wukong__` namespace. For package inbox items, `ignore`

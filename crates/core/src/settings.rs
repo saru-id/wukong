@@ -869,9 +869,165 @@ pub fn read_current(
     out
 }
 
+/// Domain name for a plist file, inverting `plist_path`'s spelling.
+fn domain_of(file_name: &str) -> Option<&str> {
+    if file_name == ".GlobalPreferences.plist" {
+        return Some("NSGlobalDomain");
+    }
+    file_name.strip_suffix(".plist")
+}
+
+/// Read EVERY top-level scalar key in every domain — the capture
+/// snapshot. Deliberately bounded to what wukong can govern: top-level
+/// scalars (nested state and arrays are app furniture, and `defaults
+/// write` cannot address them cleanly anyway).
+#[must_use]
+pub fn read_all(prefs_dir: &Path) -> BTreeMap<(String, String), Value> {
+    let mut out = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(prefs_dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(domain) = domain_of(&name) else {
+            continue;
+        };
+        let Ok(plist::Value::Dictionary(dict)) = plist::Value::from_file(entry.path()) else {
+            continue;
+        };
+        for (key, raw) in &dict {
+            if let Some(value) = Value::from_plist(raw) {
+                out.insert((domain.to_string(), key.clone()), value);
+            }
+        }
+    }
+    out
+}
+
+/// Keys that are app furniture, not settings: window geometry, panel
+/// state, update timestamps, session identifiers. Capture filters
+/// these from the signal (they stay visible behind `--all`). The list
+/// is curated and deliberately conservative — a false "noise" verdict
+/// hides a real setting, a false "signal" merely adds a line.
+const NOISE_KEY_MARKERS: &[&str] = &[
+    "NSWindow Frame",
+    "NSNav Panel",
+    "NSNavLast",
+    "NSNavRecent",
+    "NSToolbar Configuration",
+    "NSSplitView",
+    "NSTableView Columns",
+    "NSTableView Sort",
+    "NSTableView Supports",
+    "NSOutlineView Items",
+    "NSStatusItem",
+    "QuickLook",
+    "SULastCheck",
+    "LastUsed",
+    "LastOpened",
+    "LastAttempt",
+    "LastRun",
+    "LastScan",
+    "LastVacuum",
+    "Timestamp",
+    "SessionID",
+    "session-id",
+    "-uuid",
+    "UUID",
+    "TrialArm",
+    "CKPerBootTasks",
+    "seed-",
+];
+
+/// Whole domains that are pure churn.
+const NOISE_DOMAINS: &[&str] = &[
+    "com.apple.EmojiCache",
+    "com.apple.spaces",
+    "ContextStoreAgent",
+    "com.apple.xpc.activity2",
+    "com.apple.knowledge-agent",
+    "com.apple.identityservices.idstatuscache",
+    "com.apple.CloudKit",
+    "com.apple.security.KCN",
+];
+
+/// Is this changed key app furniture rather than a setting?
+#[must_use]
+pub fn is_noise_key(domain: &str, key: &str) -> bool {
+    if NOISE_DOMAINS.iter().any(|d| domain.starts_with(d)) {
+        return true;
+    }
+    NOISE_KEY_MARKERS.iter().any(|m| key.contains(m))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_all_sees_every_domain_and_only_scalars() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prefs = tmp.path();
+        let mut dock = plist::Dictionary::new();
+        dock.insert("autohide".into(), plist::Value::Boolean(true));
+        dock.insert("furniture".into(), plist::Value::Array(vec![]));
+        plist::Value::Dictionary(dock)
+            .to_file_binary(plist_path(prefs, "com.apple.dock"))
+            .unwrap();
+        let mut global = plist::Dictionary::new();
+        global.insert("KeyRepeat".into(), plist::Value::Integer(2.into()));
+        plist::Value::Dictionary(global)
+            .to_file_binary(plist_path(prefs, "NSGlobalDomain"))
+            .unwrap();
+        std::fs::write(prefs.join("not-a-plist.txt"), "ignored").unwrap();
+
+        let all = read_all(prefs);
+        assert_eq!(all.len(), 2);
+        assert!(all.contains_key(&("com.apple.dock".to_string(), "autohide".to_string())));
+        // The global domain's on-disk spelling maps back to its name.
+        assert!(all.contains_key(&("NSGlobalDomain".to_string(), "KeyRepeat".to_string())));
+    }
+
+    #[test]
+    fn noise_filter_is_conservative() {
+        assert!(is_noise_key("com.apple.finder", "NSWindow Frame main"));
+        assert!(is_noise_key("com.apple.dock", "SULastCheckTime"));
+        assert!(is_noise_key("com.apple.spaces", "anything"));
+        // Real settings survive.
+        assert!(!is_noise_key("com.apple.dock", "autohide"));
+        assert!(!is_noise_key("NSGlobalDomain", "KeyRepeat"));
+        assert!(!is_noise_key("NSGlobalDomain", "InitialKeyRepeat"));
+        // Column-state chaff is noise; the row-size SETTING is not.
+        assert!(is_noise_key(
+            "com.apple.finder",
+            "NSTableView Columns v2 something"
+        ));
+        assert!(!is_noise_key(
+            "NSGlobalDomain",
+            "NSTableViewDefaultSizeMode"
+        ));
+        assert!(is_noise_key(
+            "com.apple.mail",
+            "NSToolbar Configuration browser"
+        ));
+        assert!(!is_noise_key(
+            "NSGlobalDomain",
+            "NSToolbarTitleViewRolloverDelay"
+        ));
+        assert!(!is_noise_key(
+            "NSGlobalDomain",
+            "NSNavPanelExpandedStateForSaveMode"
+        ));
+        // Every corpus key must be signal, or capture would hide it.
+        for s in CORPUS {
+            assert!(
+                !is_noise_key(s.domain, s.key),
+                "{}/{} misfiled",
+                s.domain,
+                s.key
+            );
+        }
+    }
 
     #[test]
     fn corpus_is_coherent() {

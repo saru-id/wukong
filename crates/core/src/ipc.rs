@@ -99,6 +99,11 @@ pub enum Request {
         key: String,
         unignore: bool,
     },
+    /// Snapshot every top-level scalar preference key (capture phase 1).
+    SettingsCaptureStart,
+    /// Diff reality against the snapshot (capture phase 2). One-shot:
+    /// the snapshot is consumed.
+    SettingsCaptureDiff,
     /// The store's commit history for one tracked file.
     FileLog {
         path: String,
@@ -129,6 +134,9 @@ pub enum Response {
     Packages {
         entries: Vec<PkgEntry>,
     },
+    CaptureDiff {
+        changes: Vec<CaptureChange>,
+    },
     Settings {
         entries: Vec<SettingEntry>,
         /// When set, `defaults` must target files under this directory
@@ -145,6 +153,20 @@ pub struct PkgEntry {
     pub provider: Provider,
     pub name: String,
     pub installed: bool,
+}
+
+/// One key that changed between capture snapshot and diff.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureChange {
+    pub domain: String,
+    pub key: String,
+    pub before: Option<settings::Value>,
+    pub after: Option<settings::Value>,
+    /// App furniture (window state, timestamps…) rather than a
+    /// setting; hidden unless asked for.
+    pub noise: bool,
+    /// Human label when the corpus knows this key.
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

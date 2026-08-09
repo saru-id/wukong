@@ -371,6 +371,36 @@ SystemUIServer…) once each. Shows the plan and confirms first."
         #[arg(long)]
         yes: bool,
     },
+    /// Find out what a settings change actually changed, and record it
+    #[command(
+        long_about = "The discovery tool for settings outside the corpus: snapshot every \
+preference key, change the setting anywhere (System Settings, an app's \
+preferences, `defaults write`), diff, and record what you choose. App \
+furniture — window positions, timestamps, session state — is filtered \
+from the signal; --all shows it anyway. Recorded keys become governed: \
+watched for change, synced through the store, applied by `settings \
+sync`. Scope: top-level scalar keys in ~/Library/Preferences (ByHost \
+and sandboxed-container domains are not yet captured)."
+    )]
+    #[command(after_long_help = "EXAMPLES:\n  \
+wukong settings capture          interactive: snapshot, wait, pick\n  \
+wukong settings capture --start  scripting: phase 1\n  \
+wukong settings capture --diff --json   scripting: phase 2")]
+    Capture {
+        /// Only snapshot (phase 1 of the scripted flow)
+        #[arg(long, conflicts_with = "diff")]
+        start: bool,
+        /// Only diff against the snapshot (phase 2)
+        #[arg(long)]
+        diff: bool,
+        /// Include filtered noise in the output
+        #[arg(long)]
+        all: bool,
+        /// Machine-readable JSON on stdout (with --diff)
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Record a setting's current value as this machine's desired value
     #[command(
         long_about = "Record the CURRENT live value of a setting into the manifest — the \
@@ -526,6 +556,21 @@ fn main() -> anyhow::Result<()> {
             SettingsAction::List { json } => settings_cli::list(json),
             SettingsAction::Diff => settings_cli::diff(),
             SettingsAction::Sync { yes } => settings_cli::sync(yes),
+            SettingsAction::Capture {
+                start,
+                diff,
+                all,
+                json,
+            } => {
+                let phase = if start {
+                    settings_cli::CapturePhase::Start
+                } else if diff {
+                    settings_cli::CapturePhase::Diff
+                } else {
+                    settings_cli::CapturePhase::Interactive
+                };
+                settings_cli::capture(&phase, all, json)
+            }
             SettingsAction::Record { domain, key } => settings_cli::record(&domain, &key),
             SettingsAction::Ignore { domain, key } => settings_cli::ignore(&domain, &key, false),
             SettingsAction::Unignore { domain, key } => settings_cli::ignore(&domain, &key, true),

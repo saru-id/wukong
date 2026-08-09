@@ -76,6 +76,12 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
   `settings record` governs any domain/key beyond the corpus.
 - Ignoring a setting offer is permanent, per key — fiddle with your
   mouse speed forever without being asked about it again.
+- **Any setting, discoverable.** `wukong settings capture` snapshots
+  every preference key, waits while you change the thing — System
+  Settings, an app, `defaults` — then shows you exactly which keys
+  changed, app furniture filtered out. Record what you choose, and
+  from then on it's governed like a corpus member. The corpus is a
+  seed, not a ceiling.
 
 ## Layout
 

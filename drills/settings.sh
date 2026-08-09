@@ -116,6 +116,19 @@ sleep 3
 check "post-sync reconcile is silent" "[ \"$(inbox_count)\" = 0 ]"
 check "list reports everything in sync" "\"$W\" settings diff | grep -q 'matches this machine'"
 
+echo "=== capture: snapshot, change, diff, record"
+"$W" settings capture --start > /dev/null
+pref com.apple.screencapture type str png
+pref org.some.app "NSWindow Frame main" str "0 0 100 100"
+CAPF="$ROOT/cap.json"
+"$W" settings capture --diff --json > "$CAPF"
+check "capture sees the real change" "grep -q '\"key\": \"type\"' '$CAPF' && grep -q '\"after\": \"png\"' '$CAPF'"
+check "corpus label rides along" "grep -q 'screenshots' '$CAPF' || grep -q 'Save screenshots' '$CAPF'"
+check "noise excluded from signal json" "! grep -q NSWindow '$CAPF'"
+"$W" settings record com.apple.screencapture type > /dev/null
+check "captured key recorded into manifest" "grep -q 'screencapture' '$MANIFEST'"
+check "second diff without start errors" "! \"$W\" settings capture --diff > /dev/null 2>&1"
+
 echo "=== list --json"
 check "settings list --json parses" "\"$W\" settings list --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d,list) and len(d)>=88'"
 

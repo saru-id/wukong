@@ -723,3 +723,87 @@ fn settings_record_takes_arbitrary_keys_and_list_reports_drift() {
     let resp = rig.engine.settings_record("org.custom.tool", "absent");
     assert!(matches!(resp, Response::Error { .. }));
 }
+
+#[test]
+fn capture_diffs_signal_from_noise_and_is_one_shot() {
+    let (mut rig, prefs) = settings_rig();
+    write_pref(
+        &prefs,
+        "com.apple.dock",
+        "autohide",
+        plist::Value::Boolean(true),
+    );
+    write_pref(
+        &prefs,
+        "org.some.app",
+        "steady",
+        plist::Value::Integer(7.into()),
+    );
+
+    // No capture in progress → a real error, not an empty diff.
+    assert!(matches!(rig.engine.capture_diff(), Response::Error { .. }));
+
+    assert!(matches!(rig.engine.capture_start(), Response::Ok { .. }));
+    // One real change, one noise change, one removal, one untouched.
+    write_pref(
+        &prefs,
+        "com.apple.dock",
+        "autohide",
+        plist::Value::Boolean(false),
+    );
+    write_pref(
+        &prefs,
+        "org.some.app",
+        "NSWindow Frame main",
+        plist::Value::String("0 0 100 100".into()),
+    );
+
+    let Response::CaptureDiff { changes } = rig.engine.capture_diff() else {
+        panic!("expected diff");
+    };
+    let signal: Vec<_> = changes.iter().filter(|c| !c.noise).collect();
+    assert_eq!(signal.len(), 1, "{changes:#?}");
+    assert_eq!(signal[0].key, "autohide");
+    assert!(signal[0].label.is_some(), "corpus key carries its label");
+    assert!(
+        changes
+            .iter()
+            .any(|c| c.noise && c.key.contains("NSWindow"))
+    );
+    // Untouched keys never appear.
+    assert!(!changes.iter().any(|c| c.key == "steady"));
+    // Signal sorts before noise.
+    assert!(!changes[0].noise);
+
+    // The snapshot was consumed: a second diff errors.
+    assert!(matches!(rig.engine.capture_diff(), Response::Error { .. }));
+}
+
+#[test]
+fn capture_then_record_makes_the_key_governed() {
+    let (mut rig, prefs) = settings_rig();
+    rig.engine.reconcile_settings(); // baseline
+    rig.engine.capture_start();
+    write_pref(
+        &prefs,
+        "org.custom.tool",
+        "fancyMode",
+        plist::Value::String("on".into()),
+    );
+    let Response::CaptureDiff { changes } = rig.engine.capture_diff() else {
+        panic!("expected diff");
+    };
+    assert_eq!(changes.len(), 1);
+
+    // Record it, exactly as the interactive picker would.
+    let resp = rig.engine.settings_record("org.custom.tool", "fancyMode");
+    assert!(matches!(resp, Response::Ok { .. }));
+    // Governed from now on: a later change offers ambiently.
+    write_pref(
+        &prefs,
+        "org.custom.tool",
+        "fancyMode",
+        plist::Value::String("off".into()),
+    );
+    assert_eq!(rig.engine.reconcile_settings(), 1);
+}
