@@ -5,7 +5,7 @@
 
 check:
 	cargo fmt --all --check
-	cargo clippy --workspace --all-targets
+	cargo clippy --workspace --all-targets -- -D warnings
 	cargo nextest run --workspace
 
 test:

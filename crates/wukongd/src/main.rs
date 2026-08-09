@@ -25,6 +25,11 @@ use watcher::WatchSignal;
 use wukong_core::ipc::{Envelope, PROTOCOL_VERSION, Request, Response};
 use wukong_core::{Config, paths};
 
+/// Full-rescan heartbeat: belt-and-braces for FSEvents gaps across
+/// sleep/wake on a machine nobody is watching.
+#[allow(clippy::duration_suboptimal_units)] // Duration::from_hours is unstable
+const RESCAN_INTERVAL: Duration = Duration::from_secs(6 * 3600);
+
 enum Msg {
     Fs(std::path::PathBuf),
     Rescan,
@@ -38,11 +43,11 @@ enum Msg {
     Shutdown,
 }
 
-/// launchd never rotates the log it redirects our stderr into; a
+/// `launchd` never rotates the log it redirects our stderr into; a
 /// long-lived daemon must cap it itself. Truncate-keeping-tail at
-/// startup (KeepAlive restarts make startup a regular event). launchd
-/// opens the file O_APPEND, so writes continue correctly at the new,
-/// smaller end.
+/// startup (`KeepAlive` restarts make startup a regular event).
+/// `launchd` opens the file `O_APPEND`, so writes continue correctly
+/// at the new, smaller end.
 fn cap_log_size() {
     const MAX: u64 = 5 * 1024 * 1024;
     const KEEP: usize = 512 * 1024;
@@ -118,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
     spawn_timer(tx.clone(), Duration::from_secs(1), || Msg::DebounceTick);
     let push_interval = Duration::from_secs(engine.config.push_interval_secs.max(10));
     spawn_timer(tx.clone(), push_interval, || Msg::PushTick);
-    spawn_timer(tx.clone(), Duration::from_secs(6 * 3600), || Msg::Rescan);
+    spawn_timer(tx.clone(), RESCAN_INTERVAL, || Msg::Rescan);
 
     serve_socket(&socket, tx.clone())?;
 
