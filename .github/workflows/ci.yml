@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Advisories land on their own clock, not on push. Monday 08:00 UTC.
+    - cron: "0 8 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,3 +31,13 @@ jobs:
         uses: taiki-e/install-action@nextest
       - name: Test
         run: cargo nextest run --workspace
+
+  audit:
+    # RustSec advisory scan over Cargo.lock; platform-independent, so
+    # the cheap runner does it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@cargo-audit
+      - name: Audit
+        run: cargo audit

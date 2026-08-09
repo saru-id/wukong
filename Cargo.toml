@@ -15,7 +15,9 @@ wukong-core = { path = "crates/core" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 notify = "8"
-ratatui = "0.30"
+ratatui = { version = "0.30", default-features = false, features = [
+    "crossterm",
+] }
 regex = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
