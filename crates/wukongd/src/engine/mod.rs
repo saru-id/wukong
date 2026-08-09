@@ -576,6 +576,9 @@ impl Engine {
                 unignore,
             } => self.pkg_ignore(provider, &name, unignore),
             Request::PkgAdoptInstalled => self.pkg_adopt_installed(),
+            Request::Exclude { path } => self.exclude(&path),
+            Request::Diff { path } => self.diff(&path),
+            Request::FileLog { path, limit } => self.file_log(&path, limit),
             // Push is orchestrated by the daemon loop so it can run off
             // this thread; reaching here means a wiring bug.
             Request::PushNow => Response::Error {
@@ -591,7 +594,10 @@ impl Engine {
             tracked: self.tracked_live.len(),
             inbox: self.db.inbox_count().unwrap_or(0),
             last_commit: self.last_commit.clone(),
-            last_push: self.last_push.clone(),
+            last_push: self
+                .last_push
+                .clone()
+                .or_else(|| self.db.last_event(EventKind::Pushed).ok().flatten()),
             unpushed: self.unpushed,
             uptime_secs: self.started.elapsed().as_secs(),
         })
@@ -760,6 +766,83 @@ impl Engine {
 
         Response::Ok {
             message: format!("resolved {} ({})", item.subject, resolution.as_str()),
+        }
+    }
+
+    /// The sentinel noise valve: stop offering anything under a path,
+    /// now and permanently. In-memory immediately, persisted to config
+    /// (when the config has an on-disk source), and every open sentinel
+    /// offer under the path is resolved away. Tracked files are never
+    /// affected — tracking always outranks excludes.
+    fn exclude(&mut self, path: &str) -> Response {
+        let canon = paths::resolve_input(path);
+        if !self.excludes.contains(&canon) {
+            self.excludes.push(canon.clone());
+        }
+        self.pending.retain(|p, _| !p.starts_with(&canon));
+        if let Ok(items) = self.db.inbox_open() {
+            for item in items {
+                let live = paths::from_store_rel(Path::new(&item.subject));
+                if item.kind() == Some(InboxKind::Sentinel) && live.starts_with(&canon) {
+                    soft(self.db.inbox_resolve(item.id, Resolution::Ignore));
+                }
+            }
+        }
+        let display = paths::display(&canon);
+        if !self.config.exclude.contains(&display) {
+            self.config.exclude.push(display.clone());
+        }
+        soft(self.config.save());
+        Response::Ok {
+            message: format!("excluded {display} — nothing under it will be offered again"),
+        }
+    }
+
+    /// Live file vs stored copy. Raw, unmasked: this is the owner
+    /// reading their own file at their own terminal, exactly like
+    /// `git diff` would.
+    fn diff(&mut self, path: &str) -> Response {
+        let live = paths::resolve_input(path);
+        if !self.tracked_live.contains(&live) {
+            return Response::Error {
+                message: format!("{} is not tracked", paths::display(&live)),
+            };
+        }
+        let content = match std::fs::read(&live) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(e) => {
+                return Response::Error {
+                    message: e.to_string(),
+                };
+            }
+        };
+        let diff = self.store.diff_against_live(&live, &content);
+        Response::Ok {
+            message: if diff.is_empty() {
+                format!("{} matches the store", paths::display(&live))
+            } else {
+                diff
+            },
+        }
+    }
+
+    /// The store's history for one tracked file.
+    fn file_log(&mut self, path: &str, limit: usize) -> Response {
+        let live = paths::resolve_input(path);
+        if !self.tracked_live.contains(&live) {
+            return Response::Error {
+                message: format!("{} is not tracked", paths::display(&live)),
+            };
+        }
+        match self
+            .store
+            .log(&paths::store_rel(&live), limit.clamp(1, 500))
+        {
+            Ok(log) if log.is_empty() => Response::Ok {
+                message: "no commits yet".to_string(),
+            },
+            Ok(log) => Response::Ok { message: log },
+            Err(e) => err(e),
         }
     }
 

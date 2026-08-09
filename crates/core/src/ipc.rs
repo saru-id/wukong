@@ -75,6 +75,21 @@ pub enum Request {
     /// Bulk-adopt everything currently installed on request (formulae
     /// and casks; apps stay offer-driven).
     PkgAdoptInstalled,
+    /// Stop offering anything under this path (sentinel noise valve).
+    /// Applied immediately, persisted to config, and any open offers
+    /// under the path are resolved away.
+    Exclude {
+        path: String,
+    },
+    /// Live file vs stored copy, as a unified diff.
+    Diff {
+        path: String,
+    },
+    /// The store's commit history for one tracked file.
+    FileLog {
+        path: String,
+        limit: usize,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -286,6 +286,20 @@ impl Store {
         })
     }
 
+    /// The commit history touching one stored file.
+    pub fn log(&self, rel: &Path, limit: usize) -> Result<String, StoreError> {
+        let spec = format!(":(literal){}", rel.to_string_lossy());
+        self.git(&[
+            "log",
+            "--format=%h  %ad  %s",
+            "--date=format:%Y-%m-%d %H:%M",
+            "-n",
+            &limit.to_string(),
+            "--",
+            &spec,
+        ])
+    }
+
     /// Every file in the mirror, as store-relative paths.
     pub fn files(&self) -> Result<Vec<PathBuf>, StoreError> {
         Ok(self

@@ -3,6 +3,7 @@
 //! the daemon socket, so scripts and prompts get the same governor the
 //! dashboard drives.
 
+mod adopt;
 mod client;
 mod init;
 mod launchd;
@@ -49,8 +50,28 @@ enum Command {
         #[command(subcommand)]
         action: PkgAction,
     },
-    /// Start tracking a file — its changes commit automatically.
-    Track { path: String },
+    /// Start tracking files — their changes commit automatically.
+    Track {
+        #[arg(required = true)]
+        paths: Vec<String>,
+    },
+    /// Find this machine's well-known dotfiles and track them all.
+    AdoptDotfiles {
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Stop offering anything under a path (sentinel noise valve).
+    Exclude { path: String },
+    /// Show what changed: live file vs the stored copy.
+    Diff { path: String },
+    /// The store's commit history for a tracked file.
+    Log {
+        path: String,
+        /// How many commits to show.
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Stop tracking a file.
     Untrack { path: String },
     /// Show what wukong is watching and where it stands.
@@ -144,7 +165,16 @@ fn main() -> anyhow::Result<()> {
             PkgAction::Ignore { name, cask, app } => pkg_cli::ignore(&name, cask, app, false),
             PkgAction::Unignore { name, cask, app } => pkg_cli::ignore(&name, cask, app, true),
         },
-        Some(Command::Track { path }) => say(Request::Track { path }),
+        Some(Command::Track { paths }) => {
+            for path in paths {
+                say(Request::Track { path })?;
+            }
+            Ok(())
+        }
+        Some(Command::AdoptDotfiles { yes }) => adopt::run(yes),
+        Some(Command::Exclude { path }) => say(Request::Exclude { path }),
+        Some(Command::Diff { path }) => say(Request::Diff { path }),
+        Some(Command::Log { path, limit }) => say(Request::FileLog { path, limit }),
         Some(Command::Untrack { path }) => say(Request::Untrack { path }),
         Some(Command::Status) => status(),
         Some(Command::Files) => files(),
@@ -198,6 +228,7 @@ fn status() -> anyhow::Result<()> {
         if s.inbox == 1 { "" } else { "s" }
     );
     println!("unpushed  {} commit(s)", s.unpushed);
+    println!("last push {}", age_of(s.last_push.as_deref()));
     println!("uptime    {}", human_secs(s.uptime_secs));
     Ok(())
 }
@@ -255,16 +286,51 @@ fn doctor() {
         "store repo exists",
     );
     check(!config.remote.is_empty(), "remote configured");
+    if !config.remote.is_empty() {
+        check(remote_reachable(&config.remote), "remote reachable");
+    }
     check(client::connected(), "daemon running");
     check(launchd::agent_path().exists(), "launchd agent installed");
     if client::connected()
         && let Ok(Response::Status(s)) = client::call(Request::Status)
     {
         println!(
-            "\n{} tracked · {} inbox · {} unpushed",
-            s.tracked, s.inbox, s.unpushed
+            "\n{} tracked · {} inbox · {} unpushed · last push {}",
+            s.tracked,
+            s.inbox,
+            s.unpushed,
+            age_of(s.last_push.as_deref())
         );
     }
+}
+
+/// "2h ago" from an RFC3339 timestamp — the remote-machine question
+/// is "is it still syncing", and a raw timestamp doesn't answer it.
+fn age_of(ts: Option<&str>) -> String {
+    let Some(ts) = ts else {
+        return "(never)".to_string();
+    };
+    let Ok(then) = ts.parse::<jiff::Timestamp>() else {
+        return ts.to_string();
+    };
+    let secs = jiff::Timestamp::now().duration_since(then).as_secs();
+    match u64::try_from(secs) {
+        Ok(secs) => format!("{} ago", human_secs(secs)),
+        Err(_) => ts.to_string(),
+    }
+}
+
+/// Prompt-free, fast-failing reachability probe.
+fn remote_reachable(remote: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["ls-remote", "--heads", remote])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env(
+            "GIT_SSH_COMMAND",
+            "ssh -o BatchMode=yes -o ConnectTimeout=10",
+        )
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 fn human_secs(secs: u64) -> String {

@@ -163,6 +163,7 @@ impl App {
             KeyCode::Char('a') if self.tab == Tab::Inbox => self.resolve(Resolution::Approve),
             KeyCode::Char('r') if self.tab == Tab::Inbox => self.resolve(Resolution::Redact),
             KeyCode::Char('i') if self.tab == Tab::Inbox => self.resolve(Resolution::Ignore),
+            KeyCode::Char('x') if self.tab == Tab::Inbox => self.exclude_selected(),
             KeyCode::Char('R') => self.refresh(),
             _ => {}
         }
@@ -186,6 +187,26 @@ impl App {
             return;
         }
         self.selected = (self.selected + len).wrapping_add_signed(delta) % len;
+    }
+
+    /// 'x' on a sentinel offer: exclude the offered file's DIRECTORY —
+    /// the useful granularity when an app churns its config subtree.
+    fn exclude_selected(&mut self) {
+        let Some(item) = self.data.inbox.get(self.selected) else {
+            return;
+        };
+        if item.kind() != Some(InboxKind::Sentinel) {
+            return;
+        }
+        let live = wukong_core::paths::from_store_rel(std::path::Path::new(&item.subject));
+        let Some(dir) = live.parent() else {
+            return;
+        };
+        let path = dir.to_string_lossy().into_owned();
+        if let Ok(Response::Ok { message }) = client::call(Request::Exclude { path }) {
+            self.flash = Some(message);
+            self.refresh();
+        }
     }
 
     fn resolve(&mut self, resolution: Resolution) {
@@ -456,6 +477,7 @@ impl App {
             {
                 Some(InboxKind::Package) => "a adopt · i never ask again · q quit",
                 Some(InboxKind::PackageGone) => "a drop from manifest · i keep · q quit",
+                Some(InboxKind::Sentinel) => "a track · i ignore · x exclude dir · q quit",
                 _ => "a approve · r redact · i ignore · 1-4 tabs · q quit",
             },
             _ => "j/k move · h/l tabs · R refresh · q quit",

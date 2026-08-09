@@ -33,8 +33,13 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
   and when an installer edits one, it lands in the inbox as
   "changed — start tracking it?".
 - **The inbox, everywhere.** The TUI opens on it (diffs inline,
-  `a`/`r`/`i` to resolve); `wukong status` prints the count; a macOS
-  notification fires only on new items.
+  `a`/`r`/`i` to resolve, `x` to exclude a noisy subtree for good);
+  `wukong status` prints the count; a macOS notification fires only on
+  new items.
+- **Built to be inspected.** `wukong diff` shows live vs stored,
+  `wukong log` shows a file's commit history, `wukong status` says how
+  long ago the last push landed — the daemon is auditable from any
+  shell, which matters most on a machine you are not sitting at.
 
 ### Packages (v0.2)
 
@@ -65,17 +70,17 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
 - `crates/wukongd` — the daemon: a tokio event loop over an FSEvents
   watcher, debounce and push timers, and a unix-socket server. Runs as
   a launchd LaunchAgent, idle-cheap.
-- `crates/wukong` — the CLI and ratatui TUI: `init`, `install`, `rm`,
-  `pkg`, `track`, `untrack`, `status`, `files`, `inbox`, `resolve`,
-  `push`, `restore`, `daemon`, `doctor`. Bare `wukong` opens the
-  dashboard.
+- `crates/wukong` — the CLI and ratatui TUI: `init`, `adopt-dotfiles`,
+  `install`, `rm`, `pkg`, `track`, `untrack`, `exclude`, `diff`, `log`,
+  `status`, `files`, `inbox`, `resolve`, `push`, `restore`, `daemon`,
+  `doctor`. Bare `wukong` opens the dashboard.
 
 ## Getting started
 
 ```sh
-cargo build --release
+cargo build --release             # or grab the release tarball
 ./target/release/wukong init      # config, store repo, launchd agent
-wukong track ~/.zshrc             # its changes now commit on their own
+wukong adopt-dotfiles             # find + track this machine's dotfiles
 wukong                            # the dashboard
 ```
 

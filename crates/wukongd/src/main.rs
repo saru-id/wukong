@@ -38,6 +38,23 @@ enum Msg {
     Shutdown,
 }
 
+/// launchd never rotates the log it redirects our stderr into; a
+/// long-lived daemon must cap it itself. Truncate-keeping-tail at
+/// startup (KeepAlive restarts make startup a regular event). launchd
+/// opens the file O_APPEND, so writes continue correctly at the new,
+/// smaller end.
+fn cap_log_size() {
+    const MAX: u64 = 5 * 1024 * 1024;
+    const KEEP: usize = 512 * 1024;
+    let log = paths::state_dir().join("wukongd.log");
+    if std::fs::metadata(&log).is_ok_and(|m| m.len() > MAX)
+        && let Ok(data) = std::fs::read(&log)
+    {
+        let tail = &data[data.len().saturating_sub(KEEP)..];
+        let _ = std::fs::write(&log, tail);
+    }
+}
+
 /// Load the config or explain why the daemon cannot run.
 fn load_config_or_exit() -> Config {
     match Config::load() {
@@ -56,6 +73,7 @@ fn load_config_or_exit() -> Config {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let config = load_config_or_exit();
+    cap_log_size();
 
     // Single instance, atomically: an OS-level file lock held for the
     // process lifetime. The connect probe alone is a TOCTOU — two
@@ -94,10 +112,13 @@ async fn main() -> anyhow::Result<()> {
     }
     bridge_watcher(fs_rx, tx.clone());
 
-    // Debounce + push timers.
+    // Debounce + push timers, plus a slow full-rescan heartbeat:
+    // belt-and-braces for FSEvents gaps across sleep/wake on a machine
+    // nobody is watching. Unchanged content settles into no-ops.
     spawn_timer(tx.clone(), Duration::from_secs(1), || Msg::DebounceTick);
     let push_interval = Duration::from_secs(engine.config.push_interval_secs.max(10));
     spawn_timer(tx.clone(), push_interval, || Msg::PushTick);
+    spawn_timer(tx.clone(), Duration::from_secs(6 * 3600), || Msg::Rescan);
 
     serve_socket(&socket, tx.clone())?;
 

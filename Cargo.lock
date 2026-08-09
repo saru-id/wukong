@@ -1814,10 +1814,11 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wukong"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
+ "jiff",
  "ratatui",
  "serde_json",
  "wukong-core",
@@ -1825,7 +1826,7 @@ dependencies = [
 
 [[package]]
 name = "wukong-core"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "jiff",
  "proptest",
@@ -1841,7 +1842,7 @@ dependencies = [
 
 [[package]]
 name = "wukongd"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "jiff",

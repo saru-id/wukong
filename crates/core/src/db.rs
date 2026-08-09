@@ -119,6 +119,16 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Timestamp of the most recent event of one kind — how `status`
+    /// answers "when did we last push" across daemon restarts.
+    pub fn last_event(&self, kind: EventKind) -> Result<Option<String>, DbError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT ts FROM events WHERE kind = ?1 ORDER BY id DESC LIMIT 1")?;
+        let mut rows = stmt.query_map(params![kind.as_str()], |row| row.get(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
     // ---- Tracked files -------------------------------------------------
 
     pub fn track(&self, path: &str) -> Result<bool, DbError> {

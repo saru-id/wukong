@@ -439,3 +439,94 @@ fn local_only_config_reports_zero_unpushed() {
     assert_eq!(status.unpushed, 0, "local-only must not count unpushed");
     assert!(!rig.engine.wants_push());
 }
+
+#[test]
+fn exclude_silences_a_subtree_and_resolves_open_offers() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let home = root.join("home");
+    let noisy = home.join("config-tree/noisyapp");
+    std::fs::create_dir_all(&noisy).unwrap();
+    let config = Config {
+        machine: "testbox".to_string(),
+        debounce_secs: 0,
+        sentinels: vec![home.join("config-tree").to_string_lossy().into_owned()],
+        ..Config::default()
+    };
+    let mut engine = Engine::new(config, &root.join("wukong.db"), &root.join("store")).unwrap();
+
+    // An offer opens for a file under the noisy subtree.
+    let file = noisy.join("state.json");
+    std::fs::write(&file, "{}").unwrap();
+    engine.touch(file.clone());
+    assert_eq!(engine.tick(), 1);
+
+    // Exclude the subtree: the open offer resolves, and further churn
+    // is silent.
+    let resp = engine.exclude(noisy.to_str().unwrap());
+    assert!(matches!(resp, Response::Ok { .. }));
+    assert_eq!(engine.db.inbox_count().unwrap(), 0);
+    std::fs::write(noisy.join("more.json"), "{}").unwrap();
+    engine.touch(noisy.join("more.json"));
+    assert_eq!(engine.tick(), 0);
+    // In-memory config gained the entry (persistence needs an on-disk
+    // source, which a test config deliberately lacks).
+    assert!(engine.config.exclude.iter().any(|e| e.contains("noisyapp")));
+    // Tracking still outranks excluding.
+    let tracked = home.join("config-tree/noisyapp/keep.conf");
+    std::fs::write(&tracked, "keep=1\n").unwrap();
+    let resp = engine.track(tracked.to_str().unwrap());
+    assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
+    std::fs::write(&tracked, "keep=2\n").unwrap();
+    engine.touch(tracked.clone());
+    engine.tick();
+    let stored =
+        std::fs::read_to_string(engine.store.dir().join(paths::store_rel(&tracked))).unwrap();
+    assert_eq!(stored, "keep=2\n");
+}
+
+#[test]
+fn diff_and_log_answer_the_daily_questions() {
+    let mut rig = rig();
+    let file = track(&mut rig, ".zshrc", "export A=1\n");
+    edit_and_settle(&mut rig, &file, "export A=1\nexport B=2\n");
+
+    // Unsettled live edit shows up in diff.
+    std::fs::write(&file, "export A=1\nexport B=2\nexport C=3\n").unwrap();
+    let Response::Ok { message } = rig.engine.diff(file.to_str().unwrap()) else {
+        panic!("diff failed");
+    };
+    assert!(message.contains("+export C=3"), "{message}");
+
+    // History lists both commits, newest first.
+    let Response::Ok { message } = rig.engine.file_log(file.to_str().unwrap(), 10) else {
+        panic!("log failed");
+    };
+    assert_eq!(message.lines().count(), 2, "{message}");
+    assert!(message.contains("+1 lines"), "{message}");
+
+    // Untracked files are refused.
+    let other = rig.home.join(".other");
+    std::fs::write(&other, "x").unwrap();
+    assert!(matches!(
+        rig.engine.diff(other.to_str().unwrap()),
+        Response::Error { .. }
+    ));
+}
+
+#[test]
+fn last_push_survives_a_daemon_restart() {
+    let mut rig = rig();
+    rig.engine
+        .db
+        .record(EventKind::Pushed, "testbox", "")
+        .unwrap();
+    rig.engine.last_push = None; // simulate a fresh boot's in-memory state
+    let Response::Status(status) = rig.engine.status() else {
+        panic!("expected status");
+    };
+    assert!(
+        status.last_push.is_some(),
+        "should fall back to the event log"
+    );
+}

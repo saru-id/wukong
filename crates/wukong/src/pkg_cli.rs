@@ -156,7 +156,7 @@ fn fetch() -> anyhow::Result<Vec<PkgEntry>> {
     }
 }
 
-fn confirm(prompt: &str) -> bool {
+pub(crate) fn confirm(prompt: &str) -> bool {
     use std::io::Write as _;
     print!("{prompt}");
     let _ = std::io::stdout().flush();

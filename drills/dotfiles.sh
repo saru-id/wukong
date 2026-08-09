@@ -105,6 +105,38 @@ git clone -q -b sandbox "$ROOT/remote.git" "$ROOT/verify"
 check "remote has approved token (deliberate)" "grep -q '$TOKEN' '$ROOT/verify/.zshrc'"
 check "remote never saw redacted hex"          "! git -C '$ROOT/verify' log -p --all | grep -q '$HEX'"
 
+echo "=== noise valve: wukong exclude"
+mkdir -p "$HOME/.config/noisyapp"
+echo '{"s":1}' > "$HOME/.config/noisyapp/state.json"
+sleep 2.5
+noisy(){ sqlite3 "$DB" "SELECT COUNT(*) FROM inbox WHERE resolved=0 AND subject LIKE '%noisyapp%'"; }
+check "noisy subtree offer appears" "[ \"\$(noisy)\" = 1 ]"
+"$W" exclude ~/.config/noisyapp > /dev/null
+check "exclude resolves the open offer" "[ \"\$(noisy)\" = 0 ]"
+echo '{"s":2}' > "$HOME/.config/noisyapp/state.json"
+sleep 2.5
+check "excluded subtree stays silent" "[ \"\$(noisy)\" = 0 ]"
+check "exclude persisted to config" "grep -q noisyapp '$XDG_CONFIG_HOME/wukong/config.toml'"
+
+echo "=== adopt-dotfiles"
+printf '[user]\n\tname = s\n' > "$HOME/.gitconfig"
+echo 'set -o vi' > "$HOME/.inputrc"
+"$W" adopt-dotfiles --yes > /dev/null
+FILES=$("$W" files)
+check "adopt tracked the found dotfiles" "echo \"\$FILES\" | grep -q gitconfig && echo \"\$FILES\" | grep -q inputrc"
+
+echo "=== diff + log"
+echo 'export Z=9' >> "$HOME/.zshrc"
+DIFF=$("$W" diff ~/.zshrc)
+check "diff shows the unsettled change" "echo \"\$DIFF\" | grep -q '+export Z=9'"
+sleep 2.5
+check "diff clean after settle" "\"$W\" diff ~/.zshrc | grep -q 'matches the store'"
+LOG=$("$W" log ~/.zshrc)
+check "log lists real history" "[ \"\$(echo \"\$LOG\" | wc -l | tr -d ' ')\" -ge 3 ]"
+
+echo "=== status knows the last push"
+check "status reports last push age" "\"$W\" status | grep 'last push' | grep -q 'ago'"
+
 echo "=== restore"
 rm "$HOME/.zshrc"
 "$W" restore ~/.zshrc > /dev/null

@@ -87,6 +87,11 @@ much later phase.
 - **The manifest defends itself.** A manifest that exists but fails to
   parse makes saves REFUSE (never save an empty default over the real
   one), and every manifest commit passes `gate::scan` first.
+- **Excludes are a live verb, not a config chore.** `wukong exclude`
+  (and `x` in the TUI) applies in memory, persists via the config's
+  `source` path, and resolves open offers under the prefix. A config
+  built in memory (tests) has `source: None` and never writes to the
+  real user's file — keep it that way.
 - **One daemon.** Startup connects to the socket first and exits if
   someone answers. Don't remove that guard: launchd KeepAlive plus a
   manual start would otherwise double-commit.

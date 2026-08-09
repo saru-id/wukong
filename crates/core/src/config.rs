@@ -23,6 +23,11 @@ pub struct Config {
     pub sentinels: Vec<String>,
     /// macOS notification on new inbox items.
     pub notifications: bool,
+    /// Where this config was loaded from — the only place `save` will
+    /// write. A config built in memory (tests) has nowhere to persist,
+    /// and must never guess its way to the real user's file.
+    #[serde(skip)]
+    pub source: Option<PathBuf>,
     /// Paths under sentinel roots that are never offered for tracking
     /// (wukong's own config, cache-like churn).
     pub exclude: Vec<String>,
@@ -60,6 +65,7 @@ impl Default for Config {
             push_interval_secs: 300,
             sentinels: default_sentinels(),
             notifications: true,
+            source: None,
             exclude: vec!["~/.config/wukong".to_string()],
             packages: Packages::default(),
         }
@@ -99,13 +105,20 @@ impl Config {
             Err(e) => return Err(format!("cannot read {}: {e}", paths::display(&path))),
         };
         toml::from_str(&text)
-            .map(Some)
+            .map(|mut config: Self| {
+                config.source = Some(path.clone());
+                Some(config)
+            })
             .map_err(|e| format!("{} does not parse: {e}", paths::display(&path)))
     }
 
     pub fn save(&self) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt as _;
-        let path = paths::config_file();
+        let Some(path) = self.source.clone() else {
+            return Err(std::io::Error::other(
+                "config has no on-disk source — nothing persisted",
+            ));
+        };
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
