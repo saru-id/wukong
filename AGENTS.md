@@ -5,10 +5,10 @@ first; it is accurate.
 
 ## What this is
 
-wukong v2: a system-governing service, NOT the old gpui setup app (that
-lives at github.com/saru-id/wukong-app and locally at `../wukong-backup`).
-A low-memory daemon (`wukongd`) plus a CLI/TUI (`wukong`); a GUI is a
-much later phase.
+wukong is a system-governing service: a low-memory daemon (`wukongd`)
+plus a CLI/TUI (`wukong`); a GUI comes later as a third client. Do not
+confuse this repo with `saru-id/wukong-app` (a separate, unrelated gpui
+application that may sit nearby on disk as `../wukong-backup`).
 
 ## Ground rules
 
@@ -77,9 +77,11 @@ much later phase.
   sentinels and tracked files watch their PARENT dir non-recursively
   (survives atomic renames and not-yet-created files); only deliberate
   directory sentinels (~/.config) watch recursively. Never let a
-  missing sentinel escalate to a recursive watch of $HOME — that was a
-  real bug. The engine accumulates `watch_requests`; main drains them
-  after each client request.
+  missing sentinel escalate to a recursive watch of $HOME — its parent
+  IS $HOME, and recursion there tails every build tree the user owns.
+  The engine accumulates `watch_requests`; main drains them after
+  EVERY loop message (promotions and re-detections fire from
+  non-client messages).
 - **The hot path stays in memory.** `touch` consults the in-memory
   roster and precomputed sentinel lists — no SQLite per event. Keep it
   that way; a cargo build under a watched root fires thousands of

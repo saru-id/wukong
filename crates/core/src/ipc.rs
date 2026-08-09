@@ -6,7 +6,7 @@ use crate::events::{Event, InboxItem, Resolution};
 use crate::pkg::Provider;
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {

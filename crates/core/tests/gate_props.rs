@@ -38,9 +38,11 @@ fn secret_token() -> impl Strategy<Value = String> {
         "AKIA[0-9A-Z]{16}",
         // Anthropic key.
         "sk-ant-[A-Za-z0-9]{24}",
-        // 64-char hex (the shape a fixed entropy bar used to miss).
+        // 64-char hex: its entropy ceiling is 4.0, so only the
+        // charset-aware bar can catch it.
         "[0-9a-f]{64}",
-        // base64-ish blob including the slash the old rule excluded.
+        // base64-ish blob, slash included — path heuristics must not
+        // swallow it.
         "[A-Za-z0-9+/]{40}",
     ]
 }

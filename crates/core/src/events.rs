@@ -1,7 +1,7 @@
 //! The shared shapes: log events, inbox items, and how an inbox item
 //! can be resolved. Kinds are real enums on the write side; rows read
-//! back from the database carry the string form, so old rows with
-//! kinds a newer binary no longer emits still display fine.
+//! back from the database carry the string form, so a row whose kind
+//! this binary doesn't recognize still displays fine.
 
 use serde::{Deserialize, Serialize};
 
@@ -70,7 +70,6 @@ pub struct InboxItem {
     pub body: String,
     /// Machine-readable extras — for quarantines, the findings'
     /// fingerprints as a JSON array.
-    #[serde(default)]
     pub meta: String,
 }
 

@@ -159,10 +159,11 @@ impl Engine {
     /// What to watch at startup, with an explicit recursion mode per
     /// root. File sentinels and tracked files are covered by watching
     /// their parent directory NON-recursively — that survives editors'
-    /// atomic renames and files that don't exist yet, and it never
-    /// escalates to watching all of `$HOME` recursively the way the
-    /// old parent-fallback did. Only true directory sentinels
-    /// (~/.config, ~/Library/LaunchAgents) watch recursively.
+    /// atomic renames and files that don't exist yet, and it must
+    /// never escalate to watching `$HOME` recursively — the parent of
+    /// a missing ~/.profile is $HOME itself, and recursion there would
+    /// tail every build tree the user owns. Only true directory
+    /// sentinels (~/.config, ~/Library/LaunchAgents) watch recursively.
     pub fn initial_watch_roots(&self) -> Vec<(PathBuf, bool)> {
         let mut roots: HashMap<PathBuf, bool> = HashMap::new();
         for dir in &self.sentinel_dirs {
@@ -413,8 +414,8 @@ impl Engine {
         0
     }
 
-    /// Commit one path and record the outcome — including the failure,
-    /// which the old `if let Ok` shape silently discarded.
+    /// Commit one path and record the outcome — failures included,
+    /// loudly: a commit that silently doesn't happen is drift.
     fn commit_scoped(&mut self, rel_path: &Path, message: &str, rel: &str, summary: &str) {
         match self.store.commit(rel_path, message) {
             Ok(Some(sha)) => self.after_commit(rel, &sha, summary),
@@ -716,9 +717,10 @@ impl Engine {
             return self.resolve_package(id, kind, &item.subject, resolution);
         }
 
-        // Guard before anything is resolved: approving a sentinel offer
-        // for a forbidden-named file is refused outright (offers skip
-        // them now, but items may predate that rule).
+        // Guard at the moment of consequence: offers skip forbidden
+        // names, but the denylist can grow between an offer and its
+        // approval — re-check before tracking, or a forbidden file
+        // would sit tracked-but-never-committing.
         if kind == Some(InboxKind::Sentinel)
             && resolution == Resolution::Approve
             && let Ok(bytes) = std::fs::read(&live)

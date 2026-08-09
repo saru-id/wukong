@@ -41,7 +41,7 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
   long ago the last push landed — the daemon is auditable from any
   shell, which matters most on a machine you are not sitting at.
 
-### Packages (v0.2)
+### Packages
 
 - **Install through wukong, never lose track.** `wukong install jq`
   runs brew (its output streams through untouched) and records the
@@ -109,9 +109,10 @@ database in `~/.local/share/wukong`, the socket in `~/.local/state`.
 
 ## Roadmap
 
-- v0.3 — settings governance, carried forward from the catalog work;
-  more package providers (mas, npm/cargo/pipx globals).
-- Later — the GUI, as a third client of the same daemon socket.
+- Settings governance: a curated corpus of macOS settings, governed
+  the same way files and packages are.
+- More package providers: mas, and npm/cargo/pipx globals.
+- The GUI, as a third client of the same daemon socket.
 
 ## Development
 

@@ -1,7 +1,7 @@
 //! The daemon's memory: `SQLite` at `~/.local/share/wukong/wukong.db`.
 //! Three tables — the append-only event log, the tracked-file roster,
-//! and the inbox. Migrations are idempotent CREATEs; the schema is
-//! young enough to grow additively.
+//! and the inbox. The schema is created complete on open; the first
+//! real migration will introduce migration machinery, not before.
 
 use crate::events::{Event, EventKind, InboxItem, InboxKind, Resolution};
 use rusqlite::{Connection, params};
@@ -52,6 +52,7 @@ impl Db {
                 subject     TEXT NOT NULL,
                 detail      TEXT NOT NULL DEFAULT '',
                 body        TEXT NOT NULL DEFAULT '',
+                meta        TEXT NOT NULL DEFAULT '',
                 resolved    INTEGER NOT NULL DEFAULT 0,
                 resolution  TEXT,
                 resolved_ts TEXT
@@ -69,14 +70,6 @@ impl Db {
                 PRIMARY KEY (provider, name)
             );",
         )?;
-        // Additive migration: the meta column (finding fingerprints as
-        // JSON) arrived after v0.1.0 databases existed.
-        let has_meta = conn
-            .prepare("SELECT 1 FROM pragma_table_info('inbox') WHERE name = 'meta'")?
-            .exists([])?;
-        if !has_meta {
-            conn.execute_batch("ALTER TABLE inbox ADD COLUMN meta TEXT NOT NULL DEFAULT ''")?;
-        }
         let db = Self { conn };
         db.prune_events()?;
         Ok(db)
@@ -350,29 +343,6 @@ mod tests {
         db.allow(".zshrc", "aabbccdd", "redact").unwrap();
         let a = db.allowances_for(".zshrc").unwrap();
         assert_eq!(a.get("aabbccdd").map(String::as_str), Some("redact"));
-    }
-
-    #[test]
-    fn v010_database_gains_meta_column() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let path = tmp.path().join("old.db");
-        // A pre-meta inbox table, as v0.1.0 created it.
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE inbox (
-                id INTEGER PRIMARY KEY, ts TEXT NOT NULL, kind TEXT NOT NULL,
-                subject TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
-                body TEXT NOT NULL DEFAULT '', resolved INTEGER NOT NULL DEFAULT 0,
-                resolution TEXT, resolved_ts TEXT
-            );
-            INSERT INTO inbox (ts, kind, subject) VALUES ('t', 'sentinel', '.zshrc');",
-        )
-        .unwrap();
-        drop(conn);
-        let db = Db::open(&path).unwrap();
-        let open = db.inbox_open().unwrap();
-        assert_eq!(open.len(), 1);
-        assert_eq!(open[0].meta, "");
     }
 
     #[test]

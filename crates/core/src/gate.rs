@@ -372,8 +372,9 @@ fn plausible_secret_value(value: &str) -> bool {
         return false; // a path or a variable reference
     }
     // Only a LEADING slash marks a path candidate; a slash mid-token
-    // is normal base64. (Random base64 can produce short segments, so
-    // structure alone cannot separate the two — found by proptest.)
+    // is normal base64. (Random base64 sometimes contains short
+    // slash-separated runs, so segment structure alone cannot tell
+    // the two apart.)
     if value.starts_with('/') && path_like(value) {
         return false;
     }
@@ -488,8 +489,8 @@ fn shannon(s: &str) -> f64 {
 }
 
 /// Replace one span with its leading edge plus a mask. Four leading
-/// characters are enough to recognize a token; the old trailing two
-/// only shrank the brute-force space of what gets committed on redact.
+/// characters are enough to recognize a token; a trailing hint would
+/// only shrink the brute-force space of what redaction commits.
 fn mask(line: &str, start: usize, end: usize) -> String {
     let secret = &line[start..end];
     let masked = if secret.len() > 8 {
@@ -719,7 +720,7 @@ source <(fzf --zsh)
     #[test]
     fn review_found_bypasses_are_caught() {
         for line in [
-            // Diff-prefixed line: '+' is not [\s"'], the old anchor missed it.
+            // Diff-prefixed line: '+' must anchor the key, not join it.
             "+API_PASSWORD=hunter2trombone99",
             "-API_PASSWORD=hunter2trombone99",
             // Quoted JSON keys.
@@ -731,7 +732,8 @@ source <(fzf --zsh)
             "設定api_key=aB3dEf6GhJ9kLm2NpQ5rS",
             // Punctuation-bearing password (the most common real shape).
             "export DB_PASSWORD=Tr0ub4dor&3xtra!suffix",
-            // Credential URLs — previously invisible to every layer.
+            // Credential URLs: the password is the secret; the host
+            // stays readable in evidence.
             "export DATABASE_URL=postgres://admin:hunter2pass@db.internal:5432/app",
             "git_remote = https://deploy:s3cr3tpassword@example.com/repo.git",
             // Bearer tokens.

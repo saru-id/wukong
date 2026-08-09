@@ -52,7 +52,7 @@ sleep 2.5
 check "clean edit committed" "grep -q 'export B=2' '$STORE/.zshrc'"
 check "summary is real, not 'updated'" "git -C '$STORE' log --oneline | grep -q '+1 lines'"
 
-echo "=== v0.1-blind secret shapes must quarantine"
+echo "=== assignment and entropy secret shapes must quarantine"
 TOKEN=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY0
 printf 'export A=1\nexport B=2\nexport MY_APP_TOKEN=%s\n' "$TOKEN" > "$HOME/.zshrc"
 sleep 2.5
@@ -77,7 +77,7 @@ echo 'export G=1' > "$HOME/.gitconfig-custom"
 sleep 1.5
 printf 'export G=1\nexport API_HASH=%s\n' "$HEX" > "$HOME/.gitconfig-custom"
 sleep 2.5
-check "hex secret quarantined (old entropy bar missed it)" "[ \"\$(sqlite3 '$DB' 'SELECT COUNT(*) FROM inbox WHERE resolved=0')\" = 1 ]"
+check "hex secret quarantined (charset-aware entropy)" "[ \"\$(sqlite3 '$DB' 'SELECT COUNT(*) FROM inbox WHERE resolved=0')\" = 1 ]"
 ID=$(sqlite3 "$DB" "SELECT id FROM inbox WHERE resolved=0 LIMIT 1")
 "$W" resolve "$ID" redact > /dev/null
 sleep 2.5
