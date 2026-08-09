@@ -108,24 +108,21 @@ much later phase.
 ## Verification
 
 ```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets
-cargo nextest run
+make check   # fmt + clippy + tests (what CI's check job runs)
+make drill   # both live drills, sandboxed
+make audit   # RustSec advisory scan
+make ci      # all of the above
 ```
 
-For the daemon, run the isolated live drill: point `HOME` and the three
-`XDG_*` vars at a tempdir, write a `config.toml` with a bare-repo
-remote, start `wukongd`, then exercise the full loop: track → edit →
-auto-commit (summary must be `+N lines`, not `updated`), a
-`FOO_TOKEN=`-shaped secret and a 64-char hex secret (both must
-quarantine; the sqlite inbox body must NOT contain the raw token),
-approve → next edit must NOT re-quarantine, redact → store masked +
-live untouched + sticky, an untracked sentinel change (must be
-offered), a `credentials.json` under a sentinel dir (must NOT be
-offered), `wukong push` (reply must reflect the real result; the
-redacted secret must never appear in `git log -p` on the remote), and
-`wukong restore`. Never run the daemon against the real `$HOME` while
-testing.
+The toolchain is pinned in rust-toolchain.toml so local and CI clippy
+always agree; bump it deliberately, in its own commit.
+
+The live drills ARE in the repo: `make drill` runs both
+(`drills/dotfiles.sh`, `drills/packages.sh`) — the real daemon in a
+sandboxed HOME/XDG tempdir, replaying every failure mode past reviews
+found. CI runs them on every push. Extend the drills whenever a new
+failure mode is fixed; never run the daemon against the real `$HOME`
+while testing.
 
 ## Runtime paths
 

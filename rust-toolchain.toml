@@ -1,0 +1,7 @@
+# Pin the exact toolchain so local dev and CI judge the code with the
+# same eyes. This class of skew has already bitten once: CI's newer
+# clippy flagged lints the local one didn't. Bumping this file is a
+# deliberate, reviewable commit.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]

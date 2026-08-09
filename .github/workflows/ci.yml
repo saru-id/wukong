@@ -16,13 +16,12 @@ jobs:
   check:
     # wukong is macOS-only (FSEvents, launchd, the diff/store git
     # behavior), so CI runs on the platform it actually ships to.
+    # The toolchain comes from rust-toolchain.toml — the same eyes as
+    # local dev, upgraded only by a deliberate commit.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
@@ -31,6 +30,12 @@ jobs:
         uses: taiki-e/install-action@nextest
       - name: Test
         run: cargo nextest run --workspace
+      - name: Live drills
+        # The real daemon in a sandbox: quarantine, sticky resolutions,
+        # sentinel discovery, package reconcile — the whole loop.
+        run: |
+          bash drills/dotfiles.sh
+          bash drills/packages.sh
 
   audit:
     # RustSec advisory scan over Cargo.lock; platform-independent, so

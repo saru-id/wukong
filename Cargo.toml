@@ -50,3 +50,8 @@ missing_panics_doc = "allow" # the few expect()s state their invariant inline
 [profile.release]
 lto = "thin"
 strip = true
+codegen-units = 1
+# A daemon that panics should die cleanly and let launchd restart it,
+# not unwind through an inconsistent event loop. Panic hooks (the
+# TUI's terminal restore) still run before the abort.
+panic = "abort"

@@ -1,0 +1,14 @@
+# Deps stay top-of-line without anyone remembering to check: weekly
+# PRs for crates and for the pinned GitHub Actions.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday

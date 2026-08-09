@@ -95,9 +95,10 @@ database in `~/.local/share/wukong`, the socket in `~/.local/state`.
 ## Development
 
 ```sh
-cargo nextest run
-cargo clippy --workspace --all-targets
+make check   # fmt, clippy (pedantic, warnings-as-errors), tests
+make drill   # live drills: the real daemon in a sandbox
 ```
 
-CI runs fmt, clippy (pedantic, warnings-as-errors), and the full test
-suite — including the gate's property tests — on every push.
+CI runs the same on every push — plus the RustSec advisory scan
+(weekly too), the property tests, and both live drills. Releases get
+an arm64 binary tarball attached automatically on publish.
