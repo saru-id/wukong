@@ -792,7 +792,7 @@ impl Engine {
         if !self.config.exclude.contains(&display) {
             self.config.exclude.push(display.clone());
         }
-        soft(self.config.save());
+        soft(self.config.persist_exclude(&display));
         Response::Ok {
             message: format!("excluded {display} — nothing under it will be offered again"),
         }
@@ -1008,7 +1008,7 @@ fn now() -> String {
 /// panic would kill the governor over a log entry.
 fn soft<T, E: std::fmt::Display>(result: Result<T, E>) {
     if let Err(e) = result {
-        eprintln!("wukongd: {e}");
+        crate::logging::emit(format_args!("error: {e}"));
     }
 }
 
@@ -1016,7 +1016,7 @@ fn soft<T, E: std::fmt::Display>(result: Result<T, E>) {
 /// but the failure is on the record.
 #[allow(clippy::needless_pass_by_value)] // shape fixed by unwrap_or_else
 fn refreshed(e: wukong_core::db::DbError) -> InboxOutcome {
-    eprintln!("wukongd: {e}");
+    crate::logging::emit(format_args!("error: {e}"));
     InboxOutcome::Refreshed
 }
 

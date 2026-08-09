@@ -13,21 +13,31 @@ pub fn run() -> anyhow::Result<()> {
         Ok(None) => Config::default(),
         Err(e) => anyhow::bail!("{e}\nfix the file (or delete it) and run `wukong init` again"),
     };
-    let fresh = config.machine.is_empty();
+    let fresh = config.source.is_none();
 
     if config.machine.is_empty() {
         config.machine = detect_machine();
     }
+    let mut remote_added = false;
     if config.remote.is_empty() {
         config.remote = prompt("Store remote (git URL; press Enter for local-only): ");
-        if !config.remote.is_empty() && !remote_reachable(&config.remote) {
+        remote_added = !config.remote.is_empty();
+        if remote_added && !remote_reachable(&config.remote) {
             println!(
                 "  note: could not reach {} right now — keeping it; pushes will retry",
                 config.remote
             );
         }
     }
-    config.save()?;
+    if fresh {
+        // A fresh machine gets the fully-commented starter: the config
+        // file is its own manual.
+        let path = Config::write_starter(&config.machine, &config.remote)?;
+        config.source = Some(path);
+    } else if remote_added {
+        // An existing file is edited surgically — comments survive.
+        config.persist_remote(&config.remote)?;
+    }
     println!("✓ config at {}", paths::display(&paths::config_file()));
 
     let store_dir = paths::store_dir();

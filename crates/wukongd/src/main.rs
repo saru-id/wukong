@@ -12,6 +12,7 @@
 //! cleanup in one place.
 
 mod engine;
+mod logging;
 mod notify_user;
 mod watcher;
 
@@ -58,6 +59,13 @@ fn cap_log_size() {
         let tail = &data[data.len().saturating_sub(KEEP)..];
         let _ = std::fs::write(&log, tail);
     }
+}
+
+fn banner(machine: &str) {
+    logging::emit(format_args!(
+        "wukongd {} starting — governing {machine}",
+        env!("CARGO_PKG_VERSION")
+    ));
 }
 
 /// Load the config or explain why the daemon cannot run.
@@ -164,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
 
     spawn_signal_handler(tx.clone());
 
+    banner(&engine.config.machine);
     let notify_on = engine.config.notifications;
 
     // Catch anything installed or changed while the daemon was down —
@@ -238,6 +247,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let _ = std::fs::remove_file(&socket);
+    logging::emit("wukongd stopping");
     Ok(())
 }
 
@@ -291,7 +301,7 @@ fn serve_socket(socket: &std::path::Path, tx: mpsc::UnboundedSender<Msg>) -> any
                     tokio::spawn(serve_client(stream, tx.clone()));
                 }
                 Err(e) => {
-                    eprintln!("wukongd: accept failed: {e}");
+                    crate::logging::emit(format_args!("accept failed: {e}"));
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
             }

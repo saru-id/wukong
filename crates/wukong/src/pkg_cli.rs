@@ -70,8 +70,12 @@ fn brew_run(args: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn list() -> anyhow::Result<()> {
+pub fn list(json: bool) -> anyhow::Result<()> {
     let entries = fetch()?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
     if entries.is_empty() {
         println!("the manifest is empty — `wukong install <pkg>` to begin,");
         println!("or `wukong pkg adopt-installed` to take in what's already here");

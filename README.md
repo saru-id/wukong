@@ -75,6 +75,22 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
   `status`, `files`, `inbox`, `resolve`, `push`, `restore`, `daemon`,
   `doctor`. Bare `wukong` opens the dashboard.
 
+## Install from a release
+
+Each release ships `wukong-vX.Y.Z-aarch64-apple-darwin.tar.gz`
+containing the binaries, man pages, and zsh completions:
+
+```sh
+tar xzf wukong-v*.tar.gz && cd wukong-v*/
+install -m 755 wukong wukongd ~/.local/bin/
+cp share/man/man1/*.1 /usr/local/share/man/man1/ 2>/dev/null || true
+cp share/zsh/site-functions/_wukong ~/.zsh/completions/ 2>/dev/null || true
+```
+
+Then `wukong init`. Leaving is as clean as arriving:
+`wukong uninstall` stops the daemon and removes the agent (data kept);
+`--purge` removes local data too. The remote store is never touched.
+
 ## Getting started
 
 ```sh

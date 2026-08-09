@@ -57,14 +57,78 @@ pub fn run(action: DaemonAction) -> anyhow::Result<()> {
             println!("wukongd restarted");
         }
         DaemonAction::Status => {
-            let running = crate::client::connected();
-            println!(
-                "wukongd is {}",
-                if running { "running" } else { "not running" }
-            );
+            // systemctl-is-active convention: scriptable exit codes.
+            if crate::client::connected() {
+                println!("wukongd is running");
+            } else {
+                println!("wukongd is not running");
+                std::process::exit(1);
+            }
         }
     }
     Ok(())
+}
+
+/// Leave the machine as if wukong had never been here — except the
+/// user's data, which goes only with an explicit `--purge`, and the
+/// remote store, which is never touched.
+pub fn uninstall(purge: bool, yes: bool) -> anyhow::Result<()> {
+    use wukong_core::paths;
+    let plist = agent_path();
+    if plist.exists() {
+        // Guarded by plist existence so a sandboxed run (drills, a
+        // machine that never installed the agent) cannot bootout a
+        // real service.
+        let domain = format!("gui/{}", uid()?);
+        launchctl_lenient(&["bootout", &domain, plist.to_str().unwrap_or_default()]);
+        std::fs::remove_file(&plist)?;
+        println!("✓ daemon stopped, launchd agent removed");
+    } else {
+        println!("· no launchd agent installed");
+    }
+
+    let data = [
+        ("config", paths::config_dir()),
+        ("store + database", paths::data_dir()),
+        ("socket + log", paths::state_dir()),
+    ];
+    if purge {
+        if !yes
+            && !crate::pkg_cli::confirm(
+                "delete the config, the database, and the LOCAL store repository? \
+The remote store is untouched. [y/N] ",
+            )
+        {
+            println!("kept everything");
+            return Ok(());
+        }
+        for (label, dir) in data {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => println!("✓ removed {label} ({})", paths::display(&dir)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => eprintln!("could not remove {}: {e}", paths::display(&dir)),
+            }
+        }
+        println!("the remote store (if configured) is untouched");
+    } else {
+        println!("kept (remove with `wukong uninstall --purge`):");
+        for (label, dir) in data {
+            println!("  {label}: {}", paths::display(&dir));
+        }
+    }
+    if let Ok(bin) = std::env::current_exe() {
+        println!(
+            "binaries left in place — remove {} and wukongd beside it yourself",
+            paths::display(&bin)
+        );
+    }
+    Ok(())
+}
+
+/// launchctl where failure is acceptable (bootout of a not-loaded
+/// agent during uninstall).
+fn launchctl_lenient(args: &[&str]) {
+    let _ = std::process::Command::new("launchctl").args(args).output();
 }
 
 fn launchctl(args: &[&str]) -> anyhow::Result<()> {
@@ -118,6 +182,7 @@ fn plist() -> String {
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
     <key>ProcessType</key><string>Background</string>
+    <key>LowPriorityBackgroundIO</key><true/>
     <key>StandardOutPath</key><string>{log}</string>
     <key>StandardErrorPath</key><string>{log}</string>
 </dict>

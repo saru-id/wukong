@@ -142,7 +142,27 @@ rm "$HOME/.zshrc"
 "$W" restore ~/.zshrc > /dev/null
 check "restore brings the file back" "grep -q 'export C=3' '$HOME/.zshrc'"
 
+echo "=== json output"
+check "status --json parses, machine correct" "\"$W\" status --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d[\"machine\"]==\"sandbox\"'"
+check "files --json is a non-empty list" "\"$W\" files --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d,list) and len(d)>=3'"
+check "inbox --json is a list" "\"$W\" inbox --json | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin),list)'"
+
+echo "=== daemon log has timestamps + banner"
+check "startup banner with version" "grep -q 'wukongd .* starting — governing sandbox' '$ROOT/daemon.log'"
+check "log lines are timestamped" "grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' '$ROOT/daemon.log'"
+
+echo "=== daemon status exit codes"
+check "daemon status exits 0 while running" "\"$W\" daemon status > /dev/null"
+
+echo "=== uninstall leaves cleanly"
 kill $DPID 2>/dev/null
+wait $DPID 2>/dev/null
+"$W" uninstall --purge --yes > /dev/null 2>&1
+check "purge removed the data dir" "[ ! -e \"$XDG_DATA_HOME/wukong\" ]"
+check "purge removed the config" "[ ! -e \"$XDG_CONFIG_HOME/wukong\" ]"
+check "purge removed the state dir" "[ ! -e \"$XDG_STATE_HOME/wukong\" ]"
+check "daemon status exits 1 when gone" "! \"$W\" daemon status > /dev/null 2>&1"
+
 echo
 echo "RESULTS: $pass passed, $fail failed"
 if [ $fail -eq 0 ]; then echo "DRILL CLEAN"; else echo "daemon log:"; tail -20 "$ROOT/daemon.log"; exit 1; fi

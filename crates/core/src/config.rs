@@ -112,20 +112,52 @@ impl Config {
             .map_err(|e| format!("{} does not parse: {e}", paths::display(&path)))
     }
 
-    pub fn save(&self) -> std::io::Result<()> {
+    /// Write the fully-commented starter config — the config file is
+    /// its own manual. Fresh machines only; existing files are edited
+    /// surgically (comment-preserving) by the `persist_*` methods.
+    pub fn write_starter(machine: &str, remote: &str) -> std::io::Result<std::path::PathBuf> {
         use std::os::unix::fs::PermissionsExt as _;
+        let path = paths::config_file();
+        if let Some(dir) = path.parent() {
+            paths::ensure_private_dir(dir)?;
+        }
+        std::fs::write(&path, starter_toml(machine, remote))?;
+        // The remote URL may carry credentials; owner-only.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(path)
+    }
+
+    /// Append one entry to `exclude` in the on-disk file, preserving
+    /// every comment and all formatting (`toml_edit`, as cargo does).
+    /// A config without an on-disk source (tests) persists nothing.
+    pub fn persist_exclude(&self, entry: &str) -> std::io::Result<()> {
+        self.edit_source(|doc| {
+            let excludes = doc["exclude"].or_insert(toml_edit::array());
+            if let Some(arr) = excludes.as_array_mut()
+                && !arr.iter().any(|v| v.as_str() == Some(entry))
+            {
+                arr.push(entry);
+            }
+        })
+    }
+
+    /// Set `remote` in the on-disk file, comment-preserving.
+    pub fn persist_remote(&self, remote: &str) -> std::io::Result<()> {
+        self.edit_source(|doc| {
+            doc["remote"] = toml_edit::value(remote);
+        })
+    }
+
+    fn edit_source(&self, edit: impl FnOnce(&mut toml_edit::DocumentMut)) -> std::io::Result<()> {
         let Some(path) = self.source.clone() else {
             return Err(std::io::Error::other(
                 "config has no on-disk source — nothing persisted",
             ));
         };
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let text = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(&path, text)?;
-        // The remote URL may carry credentials; owner-only.
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        let text = std::fs::read_to_string(&path)?;
+        let mut doc: toml_edit::DocumentMut = text.parse().map_err(std::io::Error::other)?;
+        edit(&mut doc);
+        std::fs::write(&path, doc.to_string())
     }
 
     /// Sentinel entries as canonical absolute paths — `/etc` is a
@@ -163,4 +195,105 @@ fn expand_all(entries: &[String]) -> Vec<PathBuf> {
             paths::canonicalize_lenient(&raw)
         })
         .collect()
+}
+
+/// The starter config: every key present, every key explained. This
+/// text and `Config::default()` are kept in agreement by a test.
+#[must_use]
+pub fn starter_toml(machine: &str, remote: &str) -> String {
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        r#"# wukong — the governor's configuration.
+# The daemon reads this at startup: run `wukong daemon restart` after
+# editing. wukong itself edits this file surgically (comments survive).
+
+# This machine's name — also the store branch it commits and pushes to.
+machine = "{machine}"
+
+# Where the store syncs: a private git remote. Empty means local-only
+# (no pushes). Changing it takes effect on daemon restart.
+remote = "{remote}"
+
+# Seconds a file must sit quiet before its change is committed.
+debounce_secs = 2
+
+# Seconds between automatic pushes when there is something to push.
+push_interval_secs = 300
+
+# Untracked paths watched for side effects (an installer editing your
+# shell profile, a new launchd agent). Changes appear in the inbox as
+# "track this?" offers. A file entry watches that file; a directory
+# entry watches its whole subtree.
+sentinels = [
+    "~/.zshrc",
+    "~/.zprofile",
+    "~/.zshenv",
+    "~/.profile",
+    "~/.bashrc",
+    "~/.gitconfig",
+    "~/.config",
+    "~/Library/LaunchAgents",
+    "/etc/paths.d",
+]
+
+# Paths never offered for tracking. `wukong exclude <path>` (or 'x' on
+# an offer in the dashboard) appends here. Tracked files always win
+# over excludes.
+exclude = ["~/.config/wukong"]
+
+# macOS notification when new inbox items arrive.
+notifications = true
+
+# Package governance: watch Homebrew and /Applications, offer installs
+# for adoption, keep the synced manifest.
+[packages]
+enabled = true
+# brew_prefix = "/opt/homebrew"      # override auto-detection
+# applications_dir = "/Applications" # override the default
+"#,
+        machine = esc(machine),
+        remote = esc(remote),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn starter_config_parses_and_matches_defaults() {
+        let text = starter_toml("testbox", "");
+        let parsed: Config = toml::from_str(&text).unwrap();
+        let defaults = Config::default();
+        assert_eq!(parsed.machine, "testbox");
+        assert_eq!(parsed.debounce_secs, defaults.debounce_secs);
+        assert_eq!(parsed.push_interval_secs, defaults.push_interval_secs);
+        assert_eq!(parsed.sentinels, defaults.sentinels);
+        assert_eq!(parsed.exclude, defaults.exclude);
+        assert_eq!(parsed.notifications, defaults.notifications);
+        assert_eq!(parsed.packages, defaults.packages);
+    }
+
+    #[test]
+    fn surgical_edits_preserve_comments() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, starter_toml("testbox", "")).unwrap();
+        let mut config: Config = toml::from_str(&starter_toml("testbox", "")).unwrap();
+        config.source = Some(path.clone());
+
+        config.persist_exclude("~/.config/noisyapp").unwrap();
+        config.persist_exclude("~/.config/noisyapp").unwrap(); // idempotent
+        config.persist_remote("git@example.com:store.git").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# wukong — the governor's configuration."));
+        assert!(text.contains("# Seconds a file must sit quiet"));
+        assert_eq!(text.matches("noisyapp").count(), 1);
+        assert!(text.contains(r#"remote = "git@example.com:store.git""#));
+        // And it still parses into the same shape.
+        let reparsed: Config = toml::from_str(&text).unwrap();
+        assert!(reparsed.exclude.contains(&"~/.config/noisyapp".to_string()));
+        assert_eq!(reparsed.remote, "git@example.com:store.git");
+    }
 }

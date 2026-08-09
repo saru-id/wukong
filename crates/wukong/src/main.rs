@@ -194,14 +194,22 @@ file is untouched."
 remote, how many files tracked, how many inbox items wait, how many \
 commits are unpushed, and how long ago the last push landed."
     )]
-    Status,
+    Status {
+        /// Machine-readable JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
 
     /// List tracked files
     #[command(
         long_about = "List every tracked file. A leading '!' marks a file that is in the \
 store but missing on disk (deleted, or not yet restored)."
     )]
-    Files,
+    Files {
+        /// Machine-readable JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Show the review inbox
     #[command(
@@ -209,7 +217,11 @@ store but missing on disk (deleted, or not yet restored)."
 for tracking, and packages offered for adoption or removal. Resolve \
 them with `wukong resolve` or from the dashboard."
     )]
-    Inbox,
+    Inbox {
+        /// Machine-readable JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Resolve an inbox item
     #[command(
@@ -272,6 +284,26 @@ wukong restore --force           overwrite files that differ")]
         action: DaemonAction,
     },
 
+    /// Remove wukong from this machine
+    #[command(
+        long_about = "Stop the daemon and remove the launchd agent. Your data — the config, \
+the database, and the LOCAL store repository — is kept unless --purge \
+is given; the remote store is never touched either way. Binaries are \
+left in place (wukong cannot safely delete itself); the command prints \
+where they are."
+    )]
+    #[command(after_long_help = "EXAMPLES:\n  \
+wukong uninstall                 stop the daemon, keep all data\n  \
+wukong uninstall --purge         remove local data too (confirms first)")]
+    Uninstall {
+        /// Also delete config, database, and the local store repository
+        #[arg(long)]
+        purge: bool,
+        /// Skip the confirmation prompt (with --purge)
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Check the health of the whole setup
     #[command(
         long_about = "Check the whole setup: config parses, store exists, remote configured \
@@ -303,7 +335,11 @@ pub enum PkgAction {
 package that is in the manifest but not installed — `wukong pkg sync` \
 installs those."
     )]
-    List,
+    List {
+        /// Machine-readable JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Install everything in the manifest that's missing
     #[command(
@@ -366,7 +402,7 @@ pub enum DaemonAction {
     Stop,
     /// Restart the daemon (required after editing config.toml)
     Restart,
-    /// Is the daemon running?
+    /// Is the daemon running? (exit code 0 = yes, 1 = no)
     Status,
 }
 
@@ -404,7 +440,7 @@ fn main() -> anyhow::Result<()> {
         }) => pkg_cli::install(&name, cask, no_track),
         Some(Command::Rm { name, cask }) => pkg_cli::rm(&name, cask),
         Some(Command::Pkg { action }) => match action {
-            PkgAction::List => pkg_cli::list(),
+            PkgAction::List { json } => pkg_cli::list(json),
             PkgAction::Sync { yes } => pkg_cli::sync(yes),
             PkgAction::AdoptInstalled => pkg_cli::adopt_installed(),
             PkgAction::Ignore { name, cask, app } => pkg_cli::ignore(&name, cask, app, false),
@@ -421,9 +457,9 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Diff { path }) => say(Request::Diff { path }),
         Some(Command::Log { path, limit }) => say(Request::FileLog { path, limit }),
         Some(Command::Untrack { path }) => say(Request::Untrack { path }),
-        Some(Command::Status) => status(),
-        Some(Command::Files) => files(),
-        Some(Command::Inbox) => inbox(),
+        Some(Command::Status { json }) => status(json),
+        Some(Command::Files { json }) => files(json),
+        Some(Command::Inbox { json }) => inbox(json),
         Some(Command::Resolve { id, resolution }) => say(Request::InboxResolve {
             id,
             resolution: resolution.into(),
@@ -431,6 +467,7 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Push) => say(Request::PushNow),
         Some(Command::Restore { path, force }) => say(Request::Restore { path, force }),
         Some(Command::Daemon { action }) => launchd::run(action),
+        Some(Command::Uninstall { purge, yes }) => launchd::uninstall(purge, yes),
         Some(Command::Doctor) => {
             doctor();
             Ok(())
@@ -487,10 +524,14 @@ pub fn say(req: Request) -> anyhow::Result<()> {
     }
 }
 
-fn status() -> anyhow::Result<()> {
+fn status(json: bool) -> anyhow::Result<()> {
     let Response::Status(s) = client::call(Request::Status)? else {
         anyhow::bail!("unexpected response");
     };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&s)?);
+        return Ok(());
+    }
     println!("machine   {}", s.machine);
     println!(
         "remote    {}",
@@ -512,10 +553,14 @@ fn status() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn files() -> anyhow::Result<()> {
+fn files(json: bool) -> anyhow::Result<()> {
     let Response::Tracked { files } = client::call(Request::TrackedList)? else {
         anyhow::bail!("unexpected response");
     };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&files)?);
+        return Ok(());
+    }
     if files.is_empty() {
         println!("nothing tracked yet — `wukong track ~/.zshrc`");
     }
@@ -526,10 +571,14 @@ fn files() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn inbox() -> anyhow::Result<()> {
+fn inbox(json: bool) -> anyhow::Result<()> {
     let Response::Inbox { items } = client::call(Request::InboxList)? else {
         anyhow::bail!("unexpected response");
     };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&items)?);
+        return Ok(());
+    }
     if items.is_empty() {
         println!("inbox is clear");
         return Ok(());
