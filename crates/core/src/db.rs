@@ -68,6 +68,12 @@ impl Db {
                 provider TEXT NOT NULL,
                 name     TEXT NOT NULL,
                 PRIMARY KEY (provider, name)
+            );
+            CREATE TABLE IF NOT EXISTS settings_state (
+                domain TEXT NOT NULL,
+                key    TEXT NOT NULL,
+                value  TEXT NOT NULL,
+                PRIMARY KEY (domain, key)
             );",
         )?;
         let db = Self { conn };
@@ -196,6 +202,34 @@ impl Db {
         self.conn.execute(
             "DELETE FROM pkg_state WHERE provider = ?1 AND name = ?2",
             params![provider, name],
+        )?;
+        Ok(())
+    }
+
+    // ---- Settings state ------------------------------------------------
+    // Last ACKNOWLEDGED value per governed setting; reconcile offers
+    // only on transitions against this.
+
+    pub fn settings_state(&self) -> Result<HashMap<(String, String), String>, DbError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT domain, key, value FROM settings_state")?;
+        let rows = stmt.query_map([], |row| Ok(((row.get(0)?, row.get(1)?), row.get(2)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn settings_state_set(&self, domain: &str, key: &str, value: &str) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO settings_state (domain, key, value) VALUES (?1, ?2, ?3)",
+            params![domain, key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn settings_state_remove(&self, domain: &str, key: &str) -> Result<(), DbError> {
+        self.conn.execute(
+            "DELETE FROM settings_state WHERE domain = ?1 AND key = ?2",
+            params![domain, key],
         )?;
         Ok(())
     }

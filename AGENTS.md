@@ -111,6 +111,16 @@ application that may sit nearby on disk as `../wukong-backup`).
   pre-wukong machine must not open fifty inbox items. Detection reads
   Cellar receipts (`installed_on_request`), Caskroom dirs, and .app
   bundles — never shell out to brew in the daemon.
+- **Settings: read plists, write `defaults`, never the reverse.**
+  Reads go straight to the preference plists (fast, forkless, the
+  `plist` crate); writes MUST go through the `defaults` CLI or
+  `cfprefsd` will fight you. The reconcile is transition-based against
+  `settings_state` with a `__meta__` baseline row; a change that
+  matches the manifest's desired value acknowledges silently AND
+  auto-resolves any stale offer. Bool/Int coercion and float epsilon
+  live in `settings::Value::matches` — compare with it, never with
+  `==`. The corpus (crates/core/src/settings.rs) carries label and
+  restart knowledge only; desired values live in the manifest.
 - **The manifest is store state, not a live file.** It lives at
   `__wukong__/packages.toml` inside the store repo; `restore` must
   skip the `__wukong__` namespace. For package inbox items, `ignore`

@@ -4,6 +4,7 @@
 
 use crate::events::{Event, InboxItem, Resolution};
 use crate::pkg::Provider;
+use crate::settings;
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -85,6 +86,19 @@ pub enum Request {
     Diff {
         path: String,
     },
+    /// Governed settings with desired vs live values.
+    SettingsList,
+    /// Record a setting's CURRENT live value as the desired value.
+    SettingsRecord {
+        domain: String,
+        key: String,
+    },
+    /// Never offer this setting again (or allow it again).
+    SettingsIgnore {
+        domain: String,
+        key: String,
+        unignore: bool,
+    },
     /// The store's commit history for one tracked file.
     FileLog {
         path: String,
@@ -115,6 +129,12 @@ pub enum Response {
     Packages {
         entries: Vec<PkgEntry>,
     },
+    Settings {
+        entries: Vec<SettingEntry>,
+        /// When set, `defaults` must target files under this directory
+        /// instead of real domains (sandboxed runs).
+        file_domains_dir: Option<String>,
+    },
     Error {
         message: String,
     },
@@ -125,6 +145,20 @@ pub struct PkgEntry {
     pub provider: Provider,
     pub name: String,
     pub installed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingEntry {
+    pub domain: String,
+    pub key: String,
+    /// Human label when the corpus knows this setting.
+    pub label: Option<String>,
+    /// Process to restart after applying, when the corpus knows.
+    pub restart: Option<String>,
+    pub desired: Option<settings::Value>,
+    pub live: Option<settings::Value>,
+    /// True when desired is set and live semantically matches it.
+    pub in_sync: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

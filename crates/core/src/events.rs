@@ -32,6 +32,8 @@ pub enum EventKind {
     PkgAdopted,
     PkgIgnored,
     PkgGone,
+    SettingRecorded,
+    SettingIgnored,
 }
 
 impl EventKind {
@@ -54,6 +56,8 @@ impl EventKind {
             Self::PkgAdopted => "pkg-adopted",
             Self::PkgIgnored => "pkg-ignored",
             Self::PkgGone => "pkg-gone",
+            Self::SettingRecorded => "setting-recorded",
+            Self::SettingIgnored => "setting-ignored",
         }
     }
 }
@@ -94,6 +98,9 @@ pub enum InboxKind {
     Package,
     /// A manifest package vanished outside wukong — drop it?
     PackageGone,
+    /// A governed setting changed — record the new value? (`ignore` is
+    /// PERMANENT: the key joins the manifest's ignore list.)
+    Setting,
 }
 
 impl InboxKind {
@@ -104,6 +111,7 @@ impl InboxKind {
             Self::Sentinel => "sentinel",
             Self::Package => "package",
             Self::PackageGone => "package-gone",
+            Self::Setting => "setting",
         }
     }
 
@@ -114,6 +122,7 @@ impl InboxKind {
             "sentinel" => Some(Self::Sentinel),
             "package" => Some(Self::Package),
             "package-gone" => Some(Self::PackageGone),
+            "setting" => Some(Self::Setting),
             _ => None,
         }
     }

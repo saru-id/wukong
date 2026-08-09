@@ -32,10 +32,10 @@ jobs:
         run: cargo nextest run --workspace
       - name: Live drills
         # The real daemon in a sandbox: quarantine, sticky resolutions,
-        # sentinel discovery, package reconcile — the whole loop.
-        run: |
-          bash drills/dotfiles.sh
-          bash drills/packages.sh
+        # sentinel discovery, package and settings reconcile — the
+        # whole loop. `make drill` so new drills are picked up here
+        # automatically.
+        run: make drill
 
   audit:
     # RustSec advisory scan over Cargo.lock; platform-independent, so

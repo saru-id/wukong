@@ -14,6 +14,7 @@ test:
 drill:
 	bash drills/dotfiles.sh
 	bash drills/packages.sh
+	bash drills/settings.sh
 
 audit:
 	cargo audit

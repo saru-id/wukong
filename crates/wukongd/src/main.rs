@@ -177,7 +177,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Catch anything installed or changed while the daemon was down —
     // those count as new items worth a notification too.
-    let startup_items = engine.reconcile();
+    let startup_items = engine.reconcile() + engine.reconcile_settings();
     if notify_on && startup_items > 0 {
         notify_user::inbox(startup_items);
     }

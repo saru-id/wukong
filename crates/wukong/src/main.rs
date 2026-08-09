@@ -8,6 +8,7 @@ mod client;
 mod init;
 mod launchd;
 mod pkg_cli;
+mod settings_cli;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -101,6 +102,23 @@ pending inbox offer for the package resolves itself."
     Pkg {
         #[command(subcommand)]
         action: PkgAction,
+    },
+
+    /// macOS settings: observe, record, apply
+    #[command(subcommand_value_name = "ACTION")]
+    #[command(
+        long_about = "Govern macOS defaults the way files and packages are governed. The \
+daemon watches a curated corpus of settings; when one changes, the \
+inbox offers to record the new value. Recorded values live in a \
+manifest that commits and syncs like everything else, and `settings \
+sync` applies them on a new machine — including the Dock/Finder \
+restarts each setting needs. Reads come straight from the preference \
+plists; writes always go through `defaults`, keeping cfprefsd \
+coherent."
+    )]
+    Settings {
+        #[command(subcommand)]
+        action: SettingsAction,
     },
 
     /// Start tracking files — their changes commit automatically
@@ -328,6 +346,64 @@ tracked/inbox/unpushed counts and the last push age."
 }
 
 #[derive(Subcommand)]
+pub enum SettingsAction {
+    /// Every governed setting: recorded value, live value, drift
+    #[command(
+        long_about = "Every governed setting — the curated corpus plus anything recorded \
+by hand. '·' marks observed-only settings (no recorded value), '!' \
+marks drift (recorded value differs from this machine)."
+    )]
+    List {
+        /// Machine-readable JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show only the drift: recorded values this machine doesn't match
+    Diff,
+    /// Apply every recorded value this machine doesn't match
+    #[command(
+        long_about = "Apply every recorded setting this machine has drifted from, via \
+`defaults write`, then restart the affected processes (Dock, Finder, \
+SystemUIServer…) once each. Shows the plan and confirms first."
+    )]
+    Sync {
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Record a setting's current value as this machine's desired value
+    #[command(
+        long_about = "Record the CURRENT live value of a setting into the manifest — the \
+explicit path for settings outside the curated corpus. Set the value \
+first (System Settings or `defaults write`), then record it."
+    )]
+    #[command(after_long_help = "EXAMPLES:\n  \
+wukong settings record com.apple.dock autohide\n  \
+wukong settings record NSGlobalDomain KeyRepeat")]
+    Record {
+        /// Preference domain (`NSGlobalDomain` for the global one)
+        #[arg(value_name = "DOMAIN")]
+        domain: String,
+        #[arg(value_name = "KEY")]
+        key: String,
+    },
+    /// Never offer this setting again
+    Ignore {
+        #[arg(value_name = "DOMAIN")]
+        domain: String,
+        #[arg(value_name = "KEY")]
+        key: String,
+    },
+    /// Allow a previously ignored setting to be offered again
+    Unignore {
+        #[arg(value_name = "DOMAIN")]
+        domain: String,
+        #[arg(value_name = "KEY")]
+        key: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum PkgAction {
     /// Manifest entries and whether each is actually installed
     #[command(
@@ -445,6 +521,14 @@ fn main() -> anyhow::Result<()> {
             PkgAction::AdoptInstalled => pkg_cli::adopt_installed(),
             PkgAction::Ignore { name, cask, app } => pkg_cli::ignore(&name, cask, app, false),
             PkgAction::Unignore { name, cask, app } => pkg_cli::ignore(&name, cask, app, true),
+        },
+        Some(Command::Settings { action }) => match action {
+            SettingsAction::List { json } => settings_cli::list(json),
+            SettingsAction::Diff => settings_cli::diff(),
+            SettingsAction::Sync { yes } => settings_cli::sync(yes),
+            SettingsAction::Record { domain, key } => settings_cli::record(&domain, &key),
+            SettingsAction::Ignore { domain, key } => settings_cli::ignore(&domain, &key, false),
+            SettingsAction::Unignore { domain, key } => settings_cli::ignore(&domain, &key, true),
         },
         Some(Command::Track { paths }) => {
             for path in paths {

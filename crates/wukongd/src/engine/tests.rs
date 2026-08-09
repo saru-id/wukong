@@ -530,3 +530,196 @@ fn last_push_survives_a_daemon_restart() {
         "should fall back to the event log"
     );
 }
+
+/// A rig with settings governance pointed at a fake preferences dir.
+fn settings_rig() -> (Rig, PathBuf) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let home = root.join("home");
+    let prefs = root.join("prefs");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&prefs).unwrap();
+    let mut config = Config {
+        machine: "testbox".to_string(),
+        debounce_secs: 0,
+        ..Config::default()
+    };
+    config.settings.preferences_dir = Some(prefs.clone());
+    let engine = Engine::new(config, &root.join("wukong.db"), &root.join("store")).unwrap();
+    (
+        Rig {
+            engine,
+            home,
+            _guard: tmp,
+        },
+        prefs,
+    )
+}
+
+fn write_pref(prefs: &Path, domain: &str, key: &str, value: plist::Value) {
+    use wukong_core::settings::plist_path;
+    let path = plist_path(prefs, domain);
+    let mut dict = match plist::Value::from_file(&path) {
+        Ok(plist::Value::Dictionary(d)) => d,
+        _ => plist::Dictionary::new(),
+    };
+    dict.insert(key.to_string(), value);
+    plist::Value::Dictionary(dict)
+        .to_file_binary(&path)
+        .unwrap();
+}
+
+#[test]
+fn settings_baseline_then_change_offers_and_approve_records() {
+    let (mut rig, prefs) = settings_rig();
+    // Pre-existing tuned value: baselined silently.
+    write_pref(
+        &prefs,
+        "com.apple.dock",
+        "autohide",
+        plist::Value::Boolean(true),
+    );
+    assert_eq!(rig.engine.reconcile_settings(), 0);
+    assert_eq!(rig.engine.reconcile_settings(), 0); // marker holds
+
+    // The value changes: one offer, once.
+    write_pref(
+        &prefs,
+        "com.apple.dock",
+        "autohide",
+        plist::Value::Boolean(false),
+    );
+    assert_eq!(rig.engine.reconcile_settings(), 1);
+    assert_eq!(rig.engine.reconcile_settings(), 0);
+    let item = &rig.engine.db.inbox_open().unwrap()[0];
+    assert_eq!(item.kind(), Some(InboxKind::Setting));
+    assert!(item.body.contains("true → false") || item.body.contains("(unset) → false"));
+
+    // Approve: recorded in the manifest, committed under the banner.
+    rig.engine.resolve(item.id, Resolution::Approve);
+    let desired = rig
+        .engine
+        .settings_manifest
+        .desired("com.apple.dock", "autohide")
+        .cloned();
+    assert!(matches!(
+        desired,
+        Some(wukong_core::settings::Value::Bool(false))
+    ));
+    let log = rig
+        .engine
+        .store
+        .log(Path::new(wukong_core::settings::MANIFEST_REL), 5)
+        .unwrap();
+    assert!(
+        log.contains("settings: com.apple.dock autohide = false"),
+        "{log}"
+    );
+}
+
+#[test]
+fn settings_manifest_match_is_silent_and_ignore_is_permanent() {
+    let (mut rig, prefs) = settings_rig();
+    rig.engine.reconcile_settings(); // baseline (empty)
+
+    // A change lands that ALREADY matches the manifest (sync applied,
+    // or the user set the desired value by hand): silence.
+    rig.engine.settings_manifest.set(
+        "com.apple.finder",
+        "ShowPathbar",
+        wukong_core::settings::Value::Bool(true),
+    );
+    write_pref(
+        &prefs,
+        "com.apple.finder",
+        "ShowPathbar",
+        plist::Value::Boolean(true),
+    );
+    assert_eq!(rig.engine.reconcile_settings(), 0);
+    // Bool/Int coercion counts as a match too (macOS writes both).
+    write_pref(
+        &prefs,
+        "com.apple.finder",
+        "ShowPathbar",
+        plist::Value::Integer(1.into()),
+    );
+    assert_eq!(rig.engine.reconcile_settings(), 0);
+
+    // Drift away from the desired value opens an offer; returning to
+    // it (sync, or a manual revert) auto-resolves the stale offer.
+    write_pref(
+        &prefs,
+        "com.apple.finder",
+        "ShowPathbar",
+        plist::Value::Boolean(false),
+    );
+    assert_eq!(rig.engine.reconcile_settings(), 1);
+    write_pref(
+        &prefs,
+        "com.apple.finder",
+        "ShowPathbar",
+        plist::Value::Boolean(true),
+    );
+    assert_eq!(rig.engine.reconcile_settings(), 0);
+    assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
+
+    // Ignore is the permanent opt-out.
+    write_pref(
+        &prefs,
+        "NSGlobalDomain",
+        "KeyRepeat",
+        plist::Value::Integer(2.into()),
+    );
+    assert_eq!(rig.engine.reconcile_settings(), 1);
+    let item_id = rig.engine.db.inbox_open().unwrap()[0].id;
+    rig.engine.resolve(item_id, Resolution::Ignore);
+    write_pref(
+        &prefs,
+        "NSGlobalDomain",
+        "KeyRepeat",
+        plist::Value::Integer(6.into()),
+    );
+    assert_eq!(rig.engine.reconcile_settings(), 0);
+    assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
+}
+
+#[test]
+fn settings_record_takes_arbitrary_keys_and_list_reports_drift() {
+    let (mut rig, prefs) = settings_rig();
+    rig.engine.reconcile_settings();
+    // A key far outside the corpus.
+    write_pref(
+        &prefs,
+        "org.custom.tool",
+        "fancyMode",
+        plist::Value::String("on".into()),
+    );
+    let resp = rig.engine.settings_record("org.custom.tool", "fancyMode");
+    assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
+
+    // Drift: live changes away from the recorded value.
+    write_pref(
+        &prefs,
+        "org.custom.tool",
+        "fancyMode",
+        plist::Value::String("off".into()),
+    );
+    let Response::Settings { entries, .. } = rig.engine.settings_list() else {
+        panic!("expected settings");
+    };
+    let entry = entries
+        .iter()
+        .find(|e| e.domain == "org.custom.tool")
+        .unwrap();
+    assert!(!entry.in_sync);
+    assert!(entry.label.is_none()); // outside the corpus
+    // Corpus entries carry labels.
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.domain == "com.apple.dock" && e.label.is_some())
+    );
+    // Recording an unset key is refused with a real message.
+    let resp = rig.engine.settings_record("org.custom.tool", "absent");
+    assert!(matches!(resp, Response::Error { .. }));
+}

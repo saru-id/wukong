@@ -31,10 +31,12 @@ const MAX_SENTINEL_BYTES: u64 = 1024 * 1024;
 const MAX_META_FINGERPRINTS: usize = 100;
 
 mod packages;
+mod settings;
 
 #[cfg(test)]
 mod tests;
 
+#[allow(clippy::struct_excessive_bools)] // independent runtime state bits, not a config surface
 pub struct Engine {
     pub config: Config,
     db: Db,
@@ -77,6 +79,12 @@ pub struct Engine {
     /// When the Cellar first showed a formula dir without a receipt
     /// (a pour in progress); bounds the re-arm loop.
     pkg_unsettled_since: Option<Instant>,
+    /// Settings governance: desired state, where preferences live
+    /// (None = disabled), and the reconcile debounce mark.
+    settings_manifest: wukong_core::settings::SettingsManifest,
+    settings_poisoned: bool,
+    prefs_dir: Option<PathBuf>,
+    settings_dirty: Option<Instant>,
 }
 
 impl Engine {
@@ -123,6 +131,26 @@ impl Engine {
             .iter()
             .map(|r| paths::canonicalize_lenient(r))
             .collect();
+        let (settings_manifest, settings_poisoned) =
+            match wukong_core::settings::SettingsManifest::load(store.dir()) {
+                Ok(m) => (m.unwrap_or_default(), false),
+                Err(e) => {
+                    soft(Err::<(), _>(format!(
+                        "{e} — settings manifest is READ-ONLY until fixed"
+                    )));
+                    (wukong_core::settings::SettingsManifest::default(), true)
+                }
+            };
+        let prefs_dir = if config.settings.enabled {
+            let dir = config
+                .settings
+                .preferences_dir
+                .clone()
+                .unwrap_or_else(|| paths::home().join("Library/Preferences"));
+            Some(paths::canonicalize_lenient(&dir))
+        } else {
+            None
+        };
         // Unpushed commits can exist at startup (a push interval that
         // never fired before shutdown); derive dirtiness from git, not
         // from a fresh bool, or they'd sit local until the next edit.
@@ -153,6 +181,10 @@ impl Engine {
             pkg_dirty: None,
             pkg_installed: Vec::new(),
             pkg_unsettled_since: None,
+            settings_manifest,
+            settings_poisoned,
+            prefs_dir,
+            settings_dirty: None,
         })
     }
 
@@ -181,6 +213,9 @@ impl Engine {
         }
         for root in &self.pkg_watch {
             roots.entry(root.clone()).or_insert(false);
+        }
+        if let Some(prefs) = &self.prefs_dir {
+            roots.entry(prefs.clone()).or_insert(false);
         }
         let mut out: Vec<(PathBuf, bool)> = roots.into_iter().collect();
         out.sort();
@@ -216,6 +251,15 @@ impl Engine {
             self.sentinel_dirs.push(dir);
             return;
         }
+        // Preference churn marks a settings reconcile — cfprefsd
+        // rewrites plists constantly, so per-path settling would be
+        // all noise; a debounced set-level diff is quiet by design.
+        if let Some(prefs) = &self.prefs_dir
+            && (path.parent() == Some(prefs.as_path()) || path == *prefs)
+        {
+            self.settings_dirty = Some(Instant::now());
+            return;
+        }
         // Package-root churn marks a reconcile instead of a per-path
         // settle — packages are reconciled as a set, not file by file.
         if self
@@ -247,8 +291,9 @@ impl Engine {
         for path in all {
             self.pending.insert(path, now);
         }
-        // Lost events may include package transitions.
+        // Lost events may include package or settings transitions.
         self.pkg_dirty = Some(now);
+        self.settings_dirty = Some(now);
     }
 
     fn under_sentinel(&self, path: &Path) -> bool {
@@ -275,6 +320,9 @@ impl Engine {
         }
         if self.pkg_dirty.is_some_and(|t| t.elapsed() >= debounce) {
             new_inbox += self.reconcile();
+        }
+        if self.settings_dirty.is_some_and(|t| t.elapsed() >= debounce) {
+            new_inbox += self.reconcile_settings();
         }
         new_inbox
     }
@@ -577,6 +625,13 @@ impl Engine {
                 unignore,
             } => self.pkg_ignore(provider, &name, unignore),
             Request::PkgAdoptInstalled => self.pkg_adopt_installed(),
+            Request::SettingsList => self.settings_list(),
+            Request::SettingsRecord { domain, key } => self.settings_record(&domain, &key),
+            Request::SettingsIgnore {
+                domain,
+                key,
+                unignore,
+            } => self.settings_ignore(&domain, &key, unignore),
             Request::Exclude { path } => self.exclude(&path),
             Request::Diff { path } => self.diff(&path),
             Request::FileLog { path, limit } => self.file_log(&path, limit),
@@ -715,6 +770,10 @@ impl Engine {
         // the manifest rather than the mirror.
         if let Some(kind @ (InboxKind::Package | InboxKind::PackageGone)) = kind {
             return self.resolve_package(id, kind, &item.subject, resolution);
+        }
+        // Setting items likewise; the offered value rides in meta.
+        if kind == Some(InboxKind::Setting) {
+            return self.resolve_setting(id, &item.meta, resolution);
         }
 
         // Guard at the moment of consequence: offers skip forbidden

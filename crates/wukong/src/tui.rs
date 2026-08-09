@@ -15,7 +15,7 @@ use ratatui::{Frame, Terminal};
 use std::io::stdout;
 use std::time::{Duration, Instant};
 use wukong_core::events::{InboxKind, Resolution};
-use wukong_core::ipc::{PkgEntry, Request, Response, StatusInfo, TrackedFile};
+use wukong_core::ipc::{PkgEntry, Request, Response, SettingEntry, StatusInfo, TrackedFile};
 
 const GOLD: Color = Color::Rgb(0xE0, 0xA5, 0x2A);
 
@@ -25,16 +25,24 @@ enum Tab {
     Files,
     Activity,
     Packages,
+    Settings,
 }
 
 impl Tab {
-    const ALL: [Tab; 4] = [Tab::Inbox, Tab::Files, Tab::Activity, Tab::Packages];
+    const ALL: [Tab; 5] = [
+        Tab::Inbox,
+        Tab::Files,
+        Tab::Activity,
+        Tab::Packages,
+        Tab::Settings,
+    ];
     fn title(self) -> &'static str {
         match self {
             Tab::Inbox => "Inbox",
             Tab::Files => "Files",
             Tab::Activity => "Activity",
             Tab::Packages => "Packages",
+            Tab::Settings => "Settings",
         }
     }
     fn index(self) -> usize {
@@ -49,6 +57,7 @@ struct Data {
     files: Vec<TrackedFile>,
     events: Vec<wukong_core::events::Event>,
     packages: Vec<PkgEntry>,
+    settings: Vec<SettingEntry>,
 }
 
 struct App {
@@ -132,6 +141,9 @@ impl App {
         if let Ok(Response::Packages { entries }) = client::call(Request::PkgList) {
             self.data.packages = entries;
         }
+        if let Ok(Response::Settings { entries, .. }) = client::call(Request::SettingsList) {
+            self.data.settings = entries;
+        }
         let len = self.list_len();
         if self.selected >= len {
             self.selected = len.saturating_sub(1);
@@ -144,6 +156,7 @@ impl App {
             Tab::Files => self.data.files.len(),
             Tab::Activity => self.data.events.len(),
             Tab::Packages => self.data.packages.len(),
+            Tab::Settings => self.data.settings.len(),
         }
     }
 
@@ -156,6 +169,7 @@ impl App {
             KeyCode::Char('2') => self.set_tab(Tab::Files),
             KeyCode::Char('3') => self.set_tab(Tab::Activity),
             KeyCode::Char('4') => self.set_tab(Tab::Packages),
+            KeyCode::Char('5') => self.set_tab(Tab::Settings),
             KeyCode::Char('l') | KeyCode::Tab | KeyCode::Right => self.cycle_tab(1),
             KeyCode::Char('h') | KeyCode::Left => self.cycle_tab(-1),
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
@@ -237,6 +251,7 @@ impl App {
             Tab::Files => self.render_files(f, chunks[1]),
             Tab::Activity => self.render_activity(f, chunks[1]),
             Tab::Packages => self.render_packages(f, chunks[1]),
+            Tab::Settings => self.render_settings(f, chunks[1]),
         }
         self.render_status(f, chunks[2]);
     }
@@ -249,6 +264,12 @@ impl App {
                     Tab::Inbox => self.data.inbox.len(),
                     Tab::Files => self.data.files.len(),
                     Tab::Packages => self.data.packages.len(),
+                    Tab::Settings => self
+                        .data
+                        .settings
+                        .iter()
+                        .filter(|e| e.desired.is_some() && !e.in_sync)
+                        .count(),
                     Tab::Activity => 0,
                 };
                 let label = if count > 0 {
@@ -308,6 +329,7 @@ impl App {
                     Some(InboxKind::Quarantine) => {
                         Span::styled("secret ", Style::default().fg(Color::Red))
                     }
+                    Some(InboxKind::Setting) => Span::styled("set?   ", Style::default().fg(GOLD)),
                     Some(InboxKind::Package) => Span::styled("adopt? ", Style::default().fg(GOLD)),
                     Some(InboxKind::PackageGone) => {
                         Span::styled("gone   ", Style::default().fg(Color::Red))
@@ -459,6 +481,49 @@ impl App {
         );
     }
 
+    fn render_settings(&self, f: &mut Frame, area: Rect) {
+        if self.data.settings.is_empty() {
+            f.render_widget(
+                Paragraph::new("\n  No governed settings visible.\n  Record one:  wukong settings record <domain> <key>")
+                    .style(Style::default().fg(Color::DarkGray)),
+                area,
+            );
+            return;
+        }
+        let items: Vec<ListItem> = self
+            .data
+            .settings
+            .iter()
+            .map(|e| {
+                let (mark, style) = match (&e.desired, e.in_sync) {
+                    (None, _) => ("·", Style::default().fg(Color::DarkGray)),
+                    (Some(_), true) => (" ", Style::default()),
+                    (Some(_), false) => ("!", Style::default().fg(Color::Red)),
+                };
+                let value = e
+                    .desired
+                    .as_ref()
+                    .map_or_else(String::new, |v| format!(" = {v}"));
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {mark} {} {}{value}", e.domain, e.key), style),
+                    Span::styled(
+                        format!("  {}", e.label.as_deref().unwrap_or("")),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+            })
+            .collect();
+        let mut state = ListState::default();
+        state.select(Some(self.selected));
+        f.render_stateful_widget(
+            List::new(items)
+                .highlight_style(Style::default().bg(Color::Rgb(40, 36, 28)))
+                .highlight_symbol("▌"),
+            area,
+            &mut state,
+        );
+    }
+
     fn render_status(&self, f: &mut Frame, area: Rect) {
         let s = self.data.status.as_ref();
         let left = match s {
@@ -476,6 +541,7 @@ impl App {
                 .and_then(wukong_core::InboxItem::kind)
             {
                 Some(InboxKind::Package) => "a adopt · i never ask again · q quit",
+                Some(InboxKind::Setting) => "a record · i never ask again · q quit",
                 Some(InboxKind::PackageGone) => "a drop from manifest · i keep · q quit",
                 Some(InboxKind::Sentinel) => "a track · i ignore · x exclude dir · q quit",
                 _ => "a approve · r redact · i ignore · 1-4 tabs · q quit",

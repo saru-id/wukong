@@ -62,6 +62,21 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
   remember but not install). `wukong pkg adopt-installed` bulk-imports
   an existing machine's brew world on day one.
 
+### Settings
+
+- **macOS behavior, governed like everything else.** A curated corpus
+  of 88 defaults — Dock, Finder, keyboard, trackpad, screenshots,
+  window management — is watched for change. Tweak something in System
+  Settings and the inbox offers to record the new value; recorded
+  values live in a manifest that commits and syncs like every dotfile.
+- **`wukong settings sync`** applies the recorded values on a new
+  machine — through `defaults` (never raw plist writes, so `cfprefsd`
+  stays coherent) — and restarts Dock/Finder/SystemUIServer exactly
+  once each, as the corpus prescribes. `settings diff` shows drift;
+  `settings record` governs any domain/key beyond the corpus.
+- Ignoring a setting offer is permanent, per key — fiddle with your
+  mouse speed forever without being asked about it again.
+
 ## Layout
 
 - `crates/core` — the domain: config, XDG paths, the mirror store, the
@@ -87,7 +102,9 @@ cp share/man/man1/*.1 /usr/local/share/man/man1/ 2>/dev/null || true
 cp share/zsh/site-functions/_wukong ~/.zsh/completions/ 2>/dev/null || true
 ```
 
-Then `wukong init`. Leaving is as clean as arriving:
+Then `wukong init`, and the bootstrap trio: `wukong restore` for
+files, `wukong pkg sync` for software, `wukong settings sync` for
+behavior. Leaving is as clean as arriving:
 `wukong uninstall` stops the daemon and removes the agent (data kept);
 `--purge` removes local data too. The remote store is never touched.
 

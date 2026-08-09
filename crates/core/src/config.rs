@@ -33,6 +33,27 @@ pub struct Config {
     pub exclude: Vec<String>,
     /// Package governance knobs.
     pub packages: Packages,
+    /// Settings governance knobs.
+    pub settings: Settings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// Watch preference domains, offer changes for recording.
+    pub enabled: bool,
+    /// Override ~/Library/Preferences (sandboxed runs). When set,
+    /// `defaults` writes target plist FILES under this directory.
+    pub preferences_dir: Option<PathBuf>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            preferences_dir: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -68,6 +89,7 @@ impl Default for Config {
             source: None,
             exclude: vec!["~/.config/wukong".to_string()],
             packages: Packages::default(),
+            settings: Settings::default(),
         }
     }
 }
@@ -250,6 +272,12 @@ notifications = true
 enabled = true
 # brew_prefix = "/opt/homebrew"      # override auto-detection
 # applications_dir = "/Applications" # override the default
+
+# Settings governance: watch a curated set of macOS defaults, offer
+# changes for recording, apply the manifest with `wukong settings sync`.
+[settings]
+enabled = true
+# preferences_dir = "/tmp/prefs"     # override ~/Library/Preferences
 "#,
         machine = esc(machine),
         remote = esc(remote),
@@ -272,6 +300,7 @@ mod tests {
         assert_eq!(parsed.exclude, defaults.exclude);
         assert_eq!(parsed.notifications, defaults.notifications);
         assert_eq!(parsed.packages, defaults.packages);
+        assert_eq!(parsed.settings, defaults.settings);
     }
 
     #[test]

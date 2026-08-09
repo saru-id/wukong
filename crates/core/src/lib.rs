@@ -11,6 +11,7 @@ pub mod gate;
 pub mod ipc;
 pub mod paths;
 pub mod pkg;
+pub mod settings;
 pub mod store;
 
 pub use config::Config;
