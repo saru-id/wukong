@@ -9,8 +9,10 @@ use crate::client;
 use wukong_core::ipc::{PkgEntry, Request, Response};
 use wukong_core::pkg::Provider;
 
-/// The installable providers, as a clap value enum. App is absent on
-/// purpose: wukong can only remember drag-installed apps.
+/// The installable providers, as a clap value enum. App and Mas are
+/// absent on purpose: wukong can only remember drag-installed apps,
+/// and App Store installs go through the store (then get offered for
+/// adoption).
 #[derive(Clone, Copy, clap::ValueEnum)]
 pub enum ViaArg {
     Formula,
@@ -19,8 +21,12 @@ pub enum ViaArg {
     Pnpm,
     Bun,
     Cargo,
+    Go,
+    Gem,
     Pipx,
     Uv,
+    Dotnet,
+    Pub,
 }
 
 impl From<ViaArg> for Provider {
@@ -32,8 +38,12 @@ impl From<ViaArg> for Provider {
             ViaArg::Pnpm => Provider::Pnpm,
             ViaArg::Bun => Provider::Bun,
             ViaArg::Cargo => Provider::Cargo,
+            ViaArg::Go => Provider::Go,
+            ViaArg::Gem => Provider::Gem,
             ViaArg::Pipx => Provider::Pipx,
             ViaArg::Uv => Provider::Uv,
+            ViaArg::Dotnet => Provider::Dotnet,
+            ViaArg::Pub => Provider::Pub,
         }
     }
 }
@@ -64,9 +74,13 @@ pub fn install(name: &str, provider: Provider, no_track: bool) -> anyhow::Result
 }
 
 pub fn rm(name: &str, provider: Provider) -> anyhow::Result<()> {
-    let args = provider
-        .uninstall_args(name)
-        .ok_or_else(|| anyhow::anyhow!("{} cannot uninstall", provider.as_str()))?;
+    let args = provider.uninstall_args(name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} has no uninstall command — delete it yourself, and the \
+             daemon will offer to drop {name} from the manifest",
+            provider.as_str()
+        )
+    })?;
     run_tool(&args)?;
     record(provider, name, true, false);
     Ok(())
@@ -109,12 +123,59 @@ pub fn list(json: bool) -> anyhow::Result<()> {
             missing += 1;
             "!"
         };
-        println!("{mark} {:24} {}", e.name, e.provider.as_str());
+        let version = e.version.as_deref().unwrap_or("");
+        println!(
+            "{mark} {:36} {:14} {}",
+            e.name,
+            version,
+            e.provider.as_str()
+        );
     }
     if missing > 0 {
         println!("\n{missing} missing — `wukong pkg sync` installs them");
     }
     Ok(())
+}
+
+pub fn providers(json: bool) -> anyhow::Result<()> {
+    let entries = match client::call(Request::PkgProviders)? {
+        Response::Providers { entries } => entries,
+        Response::Error { message } => anyhow::bail!(message),
+        _ => anyhow::bail!("unexpected response"),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+    for e in &entries {
+        let state = if e.active { "watching" } else { "off" };
+        let count = e
+            .count
+            .map_or_else(|| "   -".to_string(), |n| format!("{n:>4}"));
+        let path = e.path.as_deref().unwrap_or("(not found)");
+        println!(
+            "{:8} {state:8} {count}  {path}  ({})",
+            e.provider.as_str(),
+            e.origin
+        );
+    }
+    println!(
+        "\n{} of {} providers active — [packages.roots] in the config pins or disables any of them",
+        entries.iter().filter(|e| e.active).count(),
+        entries.len()
+    );
+    Ok(())
+}
+
+/// The exact command that would install a missing entry — `None`
+/// where wukong can only remember it (drag-installed apps, App Store
+/// apps whose id was never captured).
+fn plan_for(e: &PkgEntry) -> Option<Vec<String>> {
+    match e.provider {
+        Provider::App => None,
+        Provider::Mas => e.id.as_deref().and_then(|id| e.provider.install_args(id)),
+        _ => e.provider.install_args(&e.name),
+    }
 }
 
 pub fn sync(yes: bool, dry_run: bool) -> anyhow::Result<()> {
@@ -123,15 +184,23 @@ pub fn sync(yes: bool, dry_run: bool) -> anyhow::Result<()> {
         println!("everything in the manifest is installed");
         return Ok(());
     }
-    let (installable, apps): (Vec<_>, Vec<_>) = missing
+    let (planned, by_hand): (Vec<_>, Vec<_>) = missing
         .into_iter()
-        .partition(|e| e.provider.install_args("x").is_some());
+        .map(|e| {
+            let plan = plan_for(&e);
+            (e, plan)
+        })
+        .partition(|(_, plan)| plan.is_some());
 
-    if !installable.is_empty() {
+    if !planned.is_empty() {
         println!("will run:");
-        for e in &installable {
-            let args = e.provider.install_args(&e.name).expect("partitioned");
-            println!("  {}", args.join(" "));
+        let mut last_provider = None;
+        for (e, plan) in &planned {
+            if last_provider != Some(e.provider) {
+                println!("  # {}", e.provider.as_str());
+                last_provider = Some(e.provider);
+            }
+            println!("  {}", plan.as_deref().expect("partitioned").join(" "));
         }
         if dry_run {
             println!("(dry run — nothing executed)");
@@ -140,15 +209,24 @@ pub fn sync(yes: bool, dry_run: bool) -> anyhow::Result<()> {
                 println!("nothing installed");
                 return Ok(());
             }
-            for e in &installable {
-                run_tool(&e.provider.install_args(&e.name).expect("partitioned"))?;
+            for (_, plan) in &planned {
+                run_tool(plan.as_deref().expect("partitioned"))?;
             }
-            println!("installed {} package(s)", installable.len());
+            println!("installed {} package(s)", planned.len());
         }
     }
-    if !apps.is_empty() {
+    let (store, dragged): (Vec<_>, Vec<_>) = by_hand
+        .iter()
+        .partition(|(e, _)| e.provider == Provider::Mas);
+    if !store.is_empty() {
+        println!("\nApp Store apps with no recorded id — install from the store:");
+        for (e, _) in &store {
+            println!("  {}", e.name);
+        }
+    }
+    if !dragged.is_empty() {
         println!("\napps wukong remembers but cannot install — grab these yourself:");
-        for e in &apps {
+        for (e, _) in &dragged {
             println!("  {}", e.name);
         }
     }

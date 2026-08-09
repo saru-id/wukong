@@ -40,13 +40,30 @@ applications_dir = "$ROOT/Applications"
 [packages.roots]
 npm = "$ROOT/npmroot"
 cargo = "$ROOT/cargohome"
+go = "$ROOT/gobin"
+gem = "$ROOT/gemhome"
+dotnet = "$ROOT/dotnetstore"
+pub = "$ROOT/pubcache"
 pnpm = "$ROOT/absent-pnpm"
 bun = "$ROOT/absent-bun"
 pipx = "$ROOT/absent-pipx"
 uv = "$ROOT/absent-uv"
 EOF
-mkdir -p "$ROOT/npmroot/typescript" "$ROOT/npmroot/.bin" "$ROOT/cargohome"
+mkdir -p "$ROOT/npmroot/typescript" "$ROOT/npmroot/.bin" "$ROOT/cargohome" \
+         "$ROOT/gobin" "$ROOT/gemhome/specifications" "$ROOT/dotnetstore/cake/4.0.0" \
+         "$ROOT/pubcache/melos" "$ROOT/Applications/Bought.app/Contents/_MASReceipt"
 printf '[v1]\n"ripgrep 14.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = ["rg"]\n' > "$ROOT/cargohome/.crates.toml"
+printf 'Gem::Specification' > "$ROOT/gemhome/specifications/colorls-1.4.6.gemspec"
+printf 'apple' > "$ROOT/Applications/Bought.app/Contents/_MASReceipt/receipt"
+# A synthetic Go binary: the real buildinfo blob layout, tiny.
+python3 - "$ROOT/gobin/fzf" <<'PY'
+import sys
+def vs(b): return bytes([len(b)]) + b
+sent = b"\xab" * 16
+mod = sent + b"path\tgithub.com/junegunn/fzf\nmod\tgithub.com/junegunn/fzf\tv0.46.1\th1:x=\n" + sent
+blob = b"junk-before" + b"\xff Go buildinf:" + bytes([8, 2]) + vs(b"go1.24.0") + vs(mod)
+open(sys.argv[1], "wb").write(blob)
+PY
 
 DB="$XDG_DATA_HOME/wukong/wukong.db"
 STORE="$XDG_DATA_HOME/wukong/store"
@@ -122,6 +139,33 @@ check "bulk adopt took baseline jq" "grep -q '\"jq\"' '$MANIFEST'"
 LIST=$("$W" pkg list)
 check "pkg list marks removed jq as missing" "echo \"$LIST\" | grep -q '^! jq'"
 check "pkg list shows the npm provider" "echo \"$LIST\" | grep -q npm"
+
+echo "=== expanded providers: receipts all the way down"
+check "bulk adopt took the go module path" "grep -q 'github.com/junegunn/fzf' '$MANIFEST'"
+check "bulk adopt took gem, dotnet, pub" "grep -q 'colorls' '$MANIFEST' && grep -q 'cake' '$MANIFEST' && grep -q 'melos' '$MANIFEST'"
+mkdir -p "$ROOT/Applications/NewBuy.app/Contents/_MASReceipt"
+printf 'apple' > "$ROOT/Applications/NewBuy.app/Contents/_MASReceipt/receipt"
+sleep 3
+check "App Store app offered as mas, not app" "sqlite3 '$DB' \"SELECT subject FROM inbox WHERE resolved=0\" | grep -q 'mas:NewBuy'"
+MID=$(sqlite3 "$DB" "SELECT id FROM inbox WHERE resolved=0 AND subject LIKE 'mas:%' LIMIT 1")
+"$W" resolve "$MID" approve > /dev/null
+check "mas adoption lands in the manifest" "grep -q 'NewBuy' '$MANIFEST'"
+
+rm "$ROOT/gobin/fzf" "$ROOT/gemhome/specifications/colorls-1.4.6.gemspec"
+rm -rf "$ROOT/Applications/NewBuy.app"
+sleep 3
+for GID in $(sqlite3 "$DB" "SELECT id FROM inbox WHERE resolved=0"); do "$W" resolve "$GID" ignore > /dev/null; done
+PLAN=$("$W" pkg sync --dry-run)
+check "dry-run plans go install @latest" "echo \"\$PLAN\" | grep -q 'go install github.com/junegunn/fzf@latest'"
+check "dry-run plans gem install --user-install" "echo \"\$PLAN\" | grep -q 'gem install --user-install colorls'"
+check "id-less App Store app comes back as a checklist" "echo \"\$PLAN\" | grep -q 'App Store apps with no recorded id'"
+
+echo "=== providers table"
+PROV=$("$W" pkg providers)
+check "go root is watching" "echo \"\$PROV\" | grep 'go' | grep -q watching"
+check "absent pnpm override reads off" "echo \"\$PROV\" | grep 'pnpm' | grep -q off"
+check "mas rides the Applications root" "echo \"\$PROV\" | grep 'mas' | grep -q Applications"
+check "table sums the active providers" "echo \"\$PROV\" | grep -q 'of 14 providers active'"
 
 echo "=== dotfiles still governed (regression)"
 echo 'export A=1' > "$HOME/.zshrc"

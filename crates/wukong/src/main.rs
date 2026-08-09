@@ -65,16 +65,18 @@ wukong restore                   then bring a cloned store's files live")]
         long_about = "Run the provider's own installer (its output streams through \
 untouched) and record the package in the manifest, which commits and \
 syncs like every dotfile. Homebrew formulae by default; --via selects \
-any supported provider (cask, npm, pnpm, bun, cargo, pipx, uv). If \
-the daemon is down the install still works — the package is offered \
-for adoption when it returns."
+any supported provider. If the daemon is down the install still \
+works — the package is offered for adoption when it returns. App \
+Store apps have no install verb here: install them in the App Store \
+and wukong offers them for adoption."
     )]
     #[command(after_long_help = "EXAMPLES:\n  \
-wukong install jq                     a brew formula\n  \
-wukong install --cask raycast         a GUI app\n  \
-wukong install --via npm typescript   an npm global\n  \
-wukong install --via cargo ripgrep    a cargo binary\n  \
-wukong install --no-track foo         install without remembering")]
+wukong install jq                             a brew formula\n  \
+wukong install --cask raycast                 a GUI app\n  \
+wukong install --via npm typescript           an npm global\n  \
+wukong install --via go github.com/x/tool     a go binary (module path)\n  \
+wukong install --via gem colorls              a user-installed gem\n  \
+wukong install --no-track foo                 install without remembering")]
     Install {
         /// Package name, exactly as the provider knows it
         #[arg(value_name = "PACKAGE")]
@@ -93,7 +95,9 @@ wukong install --no-track foo         install without remembering")]
     /// Uninstall a package and drop it from the manifest
     #[command(
         long_about = "Run the provider's own uninstaller and remove the package from the \
-manifest. Any pending inbox offer for the package resolves itself."
+manifest. Any pending inbox offer for the package resolves itself. \
+Providers without an uninstall command (go binaries, App Store apps) \
+say so and leave the file to you."
     )]
     Rm {
         /// Package name, exactly as the provider knows it
@@ -514,10 +518,10 @@ installs those."
 
     /// Install everything in the manifest that's missing
     #[command(
-        long_about = "Install every missing manifest package via its own provider — brew, \
-npm, pnpm, bun, cargo, pipx, uv — after showing the exact commands and \
-confirming. Apps wukong can only remember (drag-installed) are printed \
-as a checklist."
+        long_about = "Install every missing manifest package via its own provider, grouped \
+and shown as the exact commands before anything runs. App Store apps \
+install through `mas` when their id was captured at adoption; the rest \
+of the apps come back as a checklist."
     )]
     Sync {
         /// Skip the confirmation prompt
@@ -528,14 +532,29 @@ as a checklist."
         dry_run: bool,
     },
 
-    /// Bulk-adopt everything brew has installed on request
+    /// Bulk-adopt everything installed on request, across providers
     #[command(
-        long_about = "Day-one onboarding: put every formula and cask that brew installed on \
-request (dependencies never count) straight into the manifest, in one \
-commit. Apps stay offer-driven — a used Mac's /Applications is too \
-noisy to adopt wholesale."
+        long_about = "Day-one onboarding: put everything installed on request — brew \
+formulae and casks (dependencies never count), npm/pnpm/bun globals, \
+cargo and go binaries, gems, pipx/uv tools, dotnet tools, pub globals — \
+straight into the manifest, in one commit. Apps (App Store included) \
+stay offer-driven: a used Mac's /Applications is too noisy to adopt \
+wholesale."
     )]
     AdoptInstalled,
+
+    /// Where every provider is observed, and why (or why not)
+    #[command(
+        long_about = "One row per provider: the root wukong watches, how it was found \
+(fixed path, probed once at startup, or a [packages.roots] override), \
+whether it is active, and how many packages it currently sees. The \
+answer to \"why isn't X being offered?\"."
+    )]
+    Providers {
+        /// Machine-readable JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Never offer this package again
     #[command(
@@ -569,12 +588,17 @@ pub enum PkgProviderArg {
     Formula,
     Cask,
     App,
+    Mas,
     Npm,
     Pnpm,
     Bun,
     Cargo,
+    Go,
+    Gem,
     Pipx,
     Uv,
+    Dotnet,
+    Pub,
 }
 
 impl From<PkgProviderArg> for wukong_core::pkg::Provider {
@@ -584,12 +608,17 @@ impl From<PkgProviderArg> for wukong_core::pkg::Provider {
             PkgProviderArg::Formula => P::Formula,
             PkgProviderArg::Cask => P::Cask,
             PkgProviderArg::App => P::App,
+            PkgProviderArg::Mas => P::Mas,
             PkgProviderArg::Npm => P::Npm,
             PkgProviderArg::Pnpm => P::Pnpm,
             PkgProviderArg::Bun => P::Bun,
             PkgProviderArg::Cargo => P::Cargo,
+            PkgProviderArg::Go => P::Go,
+            PkgProviderArg::Gem => P::Gem,
             PkgProviderArg::Pipx => P::Pipx,
             PkgProviderArg::Uv => P::Uv,
+            PkgProviderArg::Dotnet => P::Dotnet,
+            PkgProviderArg::Pub => P::Pub,
         }
     }
 }
@@ -723,6 +752,7 @@ fn main() -> anyhow::Result<()> {
             PkgAction::List { json } => pkg_cli::list(json),
             PkgAction::Sync { yes, dry_run } => pkg_cli::sync(yes, dry_run),
             PkgAction::AdoptInstalled => pkg_cli::adopt_installed(),
+            PkgAction::Providers { json } => pkg_cli::providers(json),
             PkgAction::Ignore { name, via } => pkg_cli::ignore(&name, via.into(), false),
             PkgAction::Unignore { name, via } => pkg_cli::ignore(&name, via.into(), true),
         },

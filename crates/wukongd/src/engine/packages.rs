@@ -9,8 +9,8 @@ use std::path::Path;
 use wukong_core::db::InboxOutcome;
 use wukong_core::events::{EventKind, InboxKind, Resolution};
 use wukong_core::gate::{self, GateVerdict};
-use wukong_core::ipc::{PkgEntry, Response};
-use wukong_core::pkg::{self, Provider};
+use wukong_core::ipc::{PkgEntry, ProviderStatus, Response};
+use wukong_core::pkg::{self, Installed, Provider};
 
 /// Pseudo-provider row marking that the first package reconcile has
 /// run; real providers are "formula"/"cask"/"app", so no collision.
@@ -31,7 +31,7 @@ impl Engine {
             return;
         }
         let fresh = self.config.pkg_roots();
-        if fresh.0.len() == self.pkg_roots.0.len() {
+        if fresh.watch_roots() == self.pkg_roots.watch_roots() {
             return;
         }
         for (root, recursive) in fresh.watch_roots() {
@@ -97,7 +97,8 @@ impl Engine {
         let mut new_items = 0;
         for (provider, installed) in current {
             let prev: BTreeSet<String> = self.db.pkg_state(provider.as_str()).unwrap_or_default();
-            for name in installed.difference(&prev) {
+            let names: BTreeSet<String> = installed.into_keys().collect();
+            for name in names.difference(&prev) {
                 soft(self.db.pkg_state_add(provider.as_str(), name));
                 // Reappearing resolves any stale "gone" offer — else
                 // approving it later would drop an installed package.
@@ -114,7 +115,7 @@ impl Engine {
                 }
                 new_items += self.offer_package(provider, name);
             }
-            for name in prev.difference(&installed) {
+            for name in prev.difference(&names) {
                 soft(self.db.pkg_state_remove(provider.as_str(), name));
                 // Disappearing resolves any stale adoption offer.
                 soft(self.db.inbox_resolve_open(
@@ -229,11 +230,11 @@ impl Engine {
             if remove {
                 set.remove(name);
             } else {
-                set.insert(name.to_string());
+                set.insert(name.to_string(), None);
             }
         } else if !remove {
-            let mut set = BTreeSet::new();
-            set.insert(name.to_string());
+            let mut set = Installed::new();
+            set.insert(name.to_string(), None);
             self.pkg_installed.push((provider, set));
         }
         if observe_only {
@@ -285,19 +286,49 @@ impl Engine {
     pub(super) fn pkg_list(&self) -> Response {
         // Served from the reconcile's cache: a TUI polling every two
         // seconds must not trigger a full Cellar walk each time.
-        let installed: HashMap<Provider, BTreeSet<String>> =
-            self.pkg_installed.iter().cloned().collect();
+        let installed: HashMap<Provider, &Installed> = self
+            .pkg_installed
+            .iter()
+            .map(|(p, set)| (*p, set))
+            .collect();
         Response::Packages {
             entries: self
                 .manifest
                 .entries()
                 .into_iter()
-                .map(|(provider, name)| PkgEntry {
-                    installed: installed
-                        .get(&provider)
-                        .is_some_and(|set| set.contains(&name)),
-                    provider,
-                    name,
+                .map(|(provider, name)| {
+                    let live = installed.get(&provider).and_then(|set| set.get(&name));
+                    PkgEntry {
+                        installed: live.is_some(),
+                        version: live.and_then(Clone::clone),
+                        id: self.manifest.id_of(provider, &name).map(str::to_string),
+                        provider,
+                        name,
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    pub(super) fn pkg_providers(&self) -> Response {
+        let counts: HashMap<Provider, usize> = self
+            .pkg_installed
+            .iter()
+            .map(|(p, set)| (*p, set.len()))
+            .collect();
+        Response::Providers {
+            entries: self
+                .pkg_roots
+                .status()
+                .into_iter()
+                .map(|s| ProviderStatus {
+                    count: s
+                        .active
+                        .then(|| counts.get(&s.provider).copied().unwrap_or(0)),
+                    provider: s.provider,
+                    path: s.path.map(|p| p.display().to_string()),
+                    origin: s.origin.as_str().to_string(),
+                    active: s.active,
                 })
                 .collect(),
         }
@@ -335,16 +366,16 @@ impl Engine {
     }
 
     /// Bulk onboarding: everything currently installed on request goes
-    /// straight into the manifest. Formulae and casks only — a used
-    /// Mac's /Applications is too noisy to adopt wholesale; apps stay
-    /// offer-driven.
+    /// straight into the manifest — every provider except apps: a used
+    /// Mac's /Applications (App Store included) is too noisy to adopt
+    /// wholesale, so apps stay offer-driven.
     pub(super) fn pkg_adopt_installed(&mut self) -> Response {
         let mut adopted = 0;
         for (provider, installed) in self.pkg_roots.installed() {
-            if provider == Provider::App {
+            if matches!(provider, Provider::App | Provider::Mas) {
                 continue;
             }
-            for name in installed {
+            for name in installed.into_keys() {
                 soft(self.db.pkg_state_add(provider.as_str(), &name));
                 if !self.manifest.contains(provider, &name)
                     && !self.manifest.ignored(provider, &name)
@@ -397,6 +428,18 @@ impl Engine {
         match (kind, resolution) {
             (InboxKind::Package, Resolution::Approve) => {
                 self.manifest.add(provider, &name);
+                // Adopting an App Store app captures its install id
+                // while Spotlight still knows it — `pkg sync` on the
+                // next machine needs the id, not the name. A fork,
+                // but on an explicit user action, never in reconcile.
+                if provider == Provider::Mas
+                    && let Some(id) = self
+                        .pkg_roots
+                        .applications()
+                        .and_then(|apps| mas_id(apps, &name))
+                {
+                    self.manifest.set_id(provider, &name, &id);
+                }
                 soft(self.db.record(EventKind::PkgAdopted, subject, "from inbox"));
                 self.commit_manifest(&format!("+{name}"));
             }
@@ -416,4 +459,17 @@ impl Engine {
             message: format!("resolved {subject} ({})", resolution.as_str()),
         }
     }
+}
+
+/// The App Store item id for an installed app, from Spotlight's
+/// metadata. Absent (fake apps, indexing off) reads as "no id" — the
+/// adoption still lands, sync just can't install it.
+fn mas_id(applications: &Path, name: &str) -> Option<String> {
+    let out = std::process::Command::new("mdls")
+        .args(["-raw", "-name", "kMDItemAppStoreAdamID"])
+        .arg(applications.join(format!("{name}.app")))
+        .output()
+        .ok()?;
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !id.is_empty() && id.chars().all(|c| c.is_ascii_digit())).then_some(id)
 }

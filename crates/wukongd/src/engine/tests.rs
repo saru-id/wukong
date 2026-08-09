@@ -182,9 +182,11 @@ fn pkg_rig() -> Rig {
     config.packages.brew_prefix = Some(root.join("brew"));
     config.packages.applications_dir = Some(root.join("Applications"));
     // Hermetic: point every other provider at a nonexistent path so
-    // the DEVELOPER's real npm/cargo/uv installs can never leak into
-    // the test's world.
-    for provider in ["npm", "pnpm", "bun", "cargo", "pipx", "uv"] {
+    // the DEVELOPER's real npm/cargo/go/gem installs can never leak
+    // into the test's world.
+    for provider in [
+        "npm", "pnpm", "bun", "cargo", "go", "gem", "pipx", "uv", "dotnet", "pub",
+    ] {
         config.packages.roots.insert(
             provider.to_string(),
             root.join(format!("absent-{provider}")),
@@ -998,7 +1000,9 @@ fn language_providers_offer_and_adopt() {
         debounce_secs: 0,
         ..Config::default()
     };
-    for provider in ["formula", "cask", "app", "pnpm", "bun", "pipx", "uv"] {
+    for provider in [
+        "formula", "cask", "app", "pnpm", "bun", "go", "gem", "pipx", "uv", "dotnet", "pub",
+    ] {
         config.packages.roots.insert(
             provider.to_string(),
             root.join(format!("absent-{provider}")),
@@ -1020,4 +1024,135 @@ fn language_providers_offer_and_adopt() {
     assert!(states.contains("@biomejs/biome"));
     assert!(!states.contains(".bin"));
     assert!(engine.db.pkg_state("cargo").unwrap().contains("ripgrep"));
+}
+
+/// A sandbox where every expanded provider has a live root — go, gem,
+/// dotnet, pub, and an Applications dir holding one drag-install and
+/// one App Store app — already baselined.
+fn expanded_rig() -> (tempfile::TempDir, std::path::PathBuf, Engine) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    for dir in [
+        "gobin",
+        "gemhome/specifications",
+        "dotnetstore",
+        "pubcache",
+        "Applications/Dragged.app",
+        "Applications/Bought.app/Contents/_MASReceipt",
+    ] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    std::fs::write(
+        root.join("Applications/Bought.app/Contents/_MASReceipt/receipt"),
+        b"apple",
+    )
+    .unwrap();
+
+    let mut config = Config {
+        machine: "testbox".to_string(),
+        debounce_secs: 0,
+        ..Config::default()
+    };
+    for provider in [
+        "formula", "cask", "npm", "pnpm", "bun", "cargo", "pipx", "uv",
+    ] {
+        config.packages.roots.insert(
+            provider.to_string(),
+            root.join(format!("absent-{provider}")),
+        );
+    }
+    config.packages.applications_dir = Some(root.join("Applications"));
+    for (provider, dir) in [
+        ("go", "gobin"),
+        ("gem", "gemhome"),
+        ("dotnet", "dotnetstore"),
+        ("pub", "pubcache"),
+    ] {
+        config
+            .packages
+            .roots
+            .insert(provider.to_string(), root.join(dir));
+    }
+    let mut engine = Engine::new(config, &root.join("wukong.db"), &root.join("store")).unwrap();
+    engine.reconcile(); // baseline swallows the pre-existing apps
+    assert_eq!(engine.db.inbox_count().unwrap(), 0);
+    (tmp, root, engine)
+}
+
+#[test]
+fn expanded_providers_offer_by_receipt() {
+    let (_guard, root, mut engine) = expanded_rig();
+    let apps = root.join("Applications");
+
+    // A receipt lands in every new lane at once.
+    std::fs::write(
+        root.join("gobin/tool"),
+        wukong_core::gobuild::synthesize("github.com/x/tool", "v1.2.3"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("gemhome/specifications/colorls-1.4.6.gemspec"),
+        b"Gem::Specification",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("dotnetstore/cake/4.0.0")).unwrap();
+    std::fs::create_dir_all(root.join("pubcache/melos")).unwrap();
+    std::fs::create_dir_all(apps.join("NewBuy.app/Contents/_MASReceipt")).unwrap();
+    std::fs::write(
+        apps.join("NewBuy.app/Contents/_MASReceipt/receipt"),
+        b"apple",
+    )
+    .unwrap();
+    assert_eq!(engine.reconcile(), 5);
+    let items = engine.db.inbox_open().unwrap();
+    let subjects: Vec<&str> = items.iter().map(|i| i.subject.as_str()).collect();
+    for expected in [
+        "go:github.com/x/tool",
+        "gem:colorls",
+        "dotnet:cake",
+        "pub:melos",
+        "mas:NewBuy",
+    ] {
+        assert!(subjects.contains(&expected), "{subjects:?}");
+    }
+
+    // Adoption works for module-path names, and a fake App Store app
+    // adopts WITHOUT an id (Spotlight knows nothing about it).
+    for item in &items {
+        engine.resolve(item.id, Resolution::Approve);
+    }
+    assert!(engine.manifest.contains(Provider::Go, "github.com/x/tool"));
+    assert!(engine.manifest.contains(Provider::Mas, "NewBuy"));
+    assert_eq!(engine.manifest.id_of(Provider::Mas, "NewBuy"), None);
+
+    // pkg_list carries the receipt versions.
+    let Response::Packages { entries } = engine.pkg_list() else {
+        panic!("expected package list");
+    };
+    let gem = entries.iter().find(|e| e.name == "colorls").unwrap();
+    assert_eq!(gem.version.as_deref(), Some("1.4.6"));
+    let tool = entries
+        .iter()
+        .find(|e| e.name == "github.com/x/tool")
+        .unwrap();
+    assert_eq!(tool.version.as_deref(), Some("v1.2.3"));
+
+    // The providers table reports every provider, mas riding apps.
+    let Response::Providers { entries } = engine.pkg_providers() else {
+        panic!("expected provider table");
+    };
+    assert_eq!(entries.len(), 14);
+    let mas = entries
+        .iter()
+        .find(|e| e.provider == Provider::Mas)
+        .unwrap();
+    assert!(mas.active);
+    assert_eq!(mas.path.as_deref(), Some(apps.to_str().unwrap()));
+    assert_eq!(mas.count, Some(2));
+    let npm = entries
+        .iter()
+        .find(|e| e.provider == Provider::Npm)
+        .unwrap();
+    assert!(!npm.active, "absent override must disable");
 }

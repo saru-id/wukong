@@ -8,6 +8,7 @@ pub mod config;
 pub mod db;
 pub mod events;
 pub mod gate;
+pub mod gobuild;
 pub mod ipc;
 pub mod paths;
 pub mod pkg;

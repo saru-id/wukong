@@ -470,9 +470,13 @@ impl App {
                 } else {
                     ("!", Style::default().fg(Color::Red))
                 };
+                let version = p.version.as_deref().unwrap_or("");
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!(" {mark} {:24}", p.name), style),
-                    Span::styled(p.provider.as_str(), Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!(" {mark} {:36}", p.name), style),
+                    Span::styled(
+                        format!("{version:14} {}", p.provider.as_str()),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]))
             })
             .collect();

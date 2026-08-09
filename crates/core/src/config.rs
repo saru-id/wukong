@@ -283,12 +283,23 @@ exclude = ["~/.config/wukong"]
 # macOS notification when new inbox items arrive.
 notifications = true
 
-# Package governance: watch Homebrew and /Applications, offer installs
-# for adoption, keep the synced manifest.
+# Package governance: watch every provider's install receipts, offer
+# installs for adoption, keep the synced manifest. Providers: brew
+# formulae and casks, /Applications (App Store apps recognized by
+# receipt), npm/pnpm/bun globals, cargo and go binaries, gems,
+# pipx/uv tools, dotnet tools, pub globals. `wukong pkg providers`
+# shows what's active on this machine.
 [packages]
 enabled = true
 # brew_prefix = "/opt/homebrew"      # override auto-detection
 # applications_dir = "/Applications" # override the default
+
+# Pin any provider's root, or disable one by pointing it at a path
+# that doesn't exist. Keys: formula cask app npm pnpm bun cargo go
+# gem pipx uv dotnet pub.
+# [packages.roots]
+# npm = "/opt/node/lib/node_modules"
+# gem = "~/.gem/ruby/3.3.0"
 
 # Settings governance: watch a curated set of macOS defaults, offer
 # changes for recording, apply the manifest with `wukong settings sync`.

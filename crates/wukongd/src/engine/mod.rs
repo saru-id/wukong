@@ -80,7 +80,7 @@ pub struct Engine {
     pkg_dirty: Option<Instant>,
     /// The reconcile's snapshot of what's installed — `pkg_list` serves
     /// this instead of walking the Cellar per request.
-    pkg_installed: Vec<(Provider, std::collections::BTreeSet<String>)>,
+    pkg_installed: Vec<(Provider, wukong_core::pkg::Installed)>,
     /// When the Cellar first showed a formula dir without a receipt
     /// (a pour in progress); bounds the re-arm loop.
     pkg_unsettled_since: Option<Instant>,
@@ -785,6 +785,7 @@ impl Engine {
                 observe_only,
             } => self.pkg_record(provider, &name, remove, observe_only),
             Request::PkgList => self.pkg_list(),
+            Request::PkgProviders => self.pkg_providers(),
             Request::PkgIgnore {
                 provider,
                 name,

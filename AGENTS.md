@@ -117,19 +117,23 @@ application that may sit nearby on disk as `../wukong-backup`).
   baselines silently behind an explicit `__meta__` marker row — a
   pre-wukong machine must not open fifty inbox items. Detection reads
   each manager's own on-disk receipts: Cellar receipts
-  (`installed_on_request`), Caskroom dirs, .app bundles, global
-  `node_modules` trees (npm/pnpm/bun, `@scope/name` expanded, `.bin`
-  and hidden entries skipped), `~/.cargo/.crates.toml`, and pipx/uv
-  venv dirs.
-- **Provider shell-outs are startup-only.** The daemon may fork a
-  package manager exactly once per root, at startup or on the rescan
-  heartbeat (`redetect_roots`), to LOCATE a root (`npm root -g`,
-  `pnpm root -g`) — never during reconcile, and never to LIST
-  packages. A `[packages.roots]` override suppresses even that fork
-  (defaults are lazy); an override pointing at a nonexistent dir
-  disables the provider. Engine tests MUST override all six language
-  providers to absent paths (see `pkg_rig`) or the developer's real
-  machine leaks into the suite.
+  (`installed_on_request`), Caskroom dirs, .app bundles (an
+  `_MASReceipt` classifies an app as `mas`, the rest are `app`),
+  global `node_modules` trees (npm/pnpm/bun, `@scope/name` expanded,
+  `.bin` and hidden entries skipped), `~/.cargo/.crates.toml`, the
+  buildinfo blob inside every go binary (core/src/gobuild.rs, cached
+  by mtime+size — never re-read an unchanged binary), gemspec file
+  names, pipx/uv venvs, dotnet's `.store`, pub's `global_packages`.
+- **Provider forks happen on two occasions only.** (1) At startup or
+  on the rescan heartbeat (`redetect_roots`), to LOCATE a root
+  (`npm root -g`, `pnpm root -g`); (2) on an explicit user action, to
+  enrich it (`mdls` fetching an App Store id when the user approves a
+  mas adoption). NEVER on the reconcile/watch path, and never to LIST
+  packages — reconcile stays pure file reads. A `[packages.roots]`
+  override suppresses the locate fork (defaults are lazy); an
+  override at a nonexistent dir disables the provider. Engine tests
+  MUST override every language provider to absent paths (see
+  `pkg_rig`) or the developer's real machine leaks into the suite.
 - **Settings: read plists, write `defaults`, never the reverse.**
   Reads go straight to the preference plists (fast, forkless, the
   `plist` crate); writes MUST go through the `defaults` CLI or

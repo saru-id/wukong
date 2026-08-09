@@ -71,14 +71,17 @@ pub enum Request {
     },
     /// Manifest entries with their live state.
     PkgList,
+    /// Every provider's root: path, how it was found, active or not.
+    PkgProviders,
     /// Permanent opt-out (or undo it with `unignore`).
     PkgIgnore {
         provider: Provider,
         name: String,
         unignore: bool,
     },
-    /// Bulk-adopt everything currently installed on request (formulae
-    /// and casks; apps stay offer-driven).
+    /// Bulk-adopt everything currently installed on request across
+    /// all providers (apps and App Store apps stay offer-driven —
+    /// a used Mac's /Applications is too noisy to take wholesale).
     PkgAdoptInstalled,
     /// Stop offering anything under this path (sentinel noise valve).
     /// Applied immediately, persisted to config, and any open offers
@@ -147,6 +150,9 @@ pub enum Response {
     Packages {
         entries: Vec<PkgEntry>,
     },
+    Providers {
+        entries: Vec<ProviderStatus>,
+    },
     CaptureDiff {
         changes: Vec<CaptureChange>,
     },
@@ -166,6 +172,22 @@ pub struct PkgEntry {
     pub provider: Provider,
     pub name: String,
     pub installed: bool,
+    /// Installed version, where the provider's receipt encodes one.
+    pub version: Option<String>,
+    /// External install id (App Store), when captured at adoption.
+    pub id: Option<String>,
+}
+
+/// One row of `pkg providers`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderStatus {
+    pub provider: Provider,
+    pub path: Option<String>,
+    /// "fixed" | "probed" | "override" — how the root was determined.
+    pub origin: String,
+    pub active: bool,
+    /// Installed count under this root, for active providers.
+    pub count: Option<usize>,
 }
 
 /// One key that changed between capture snapshot and diff.

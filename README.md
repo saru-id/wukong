@@ -54,27 +54,36 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
   runs brew (its output streams through untouched) and records the
   package in a manifest that lives in the store — committed, pushed,
   and historied like every dotfile. `wukong rm` is the reverse.
-  `--no-track` opts a single install out, and `--via` picks the
-  provider: brew formulae and casks, plus global npm, pnpm, bun,
-  cargo, pipx, and uv tools.
-- **Nothing escapes notice.** The daemon watches the brew Cellar,
-  Caskroom, /Applications, and every language provider's global root
-  (npm and pnpm asked once at startup, cargo's `.crates.toml`, bun,
-  pipx, and uv at their fixed homes). Install something directly —
-  `brew install`, `npm i -g`, a downloaded .app — and it lands in the
-  inbox as "adopt it?". Approve to remember it; ignore to never be
-  asked about that package again. Dependencies never surface:
-  detection reads each manager's own receipts and only what you asked
-  for counts.
+  `--no-track` opts a single install out, and `--via` picks any of
+  the fourteen providers: brew formulae and casks, apps (App Store
+  and drag-installed), and global npm, pnpm, bun, cargo, go, gem,
+  pipx, uv, dotnet, and pub tools.
+- **Nothing escapes notice.** Every provider leaves receipts on
+  disk, and the daemon reads receipts instead of asking tools:
+  brew's Cellar receipts, `.app` bundles (App Store ones carry a
+  `_MASReceipt` and are classified apart), global `node_modules`
+  trees, cargo's `.crates.toml`, the module path Go embeds in every
+  binary it builds, gemspec files, pipx and uv venvs, dotnet's
+  `.store`, pub's `global_packages`. Install something directly —
+  `brew install`, `npm i -g`, `go install`, the App Store — and it
+  lands in the inbox as "adopt it?". Approve to remember it; ignore
+  to never be asked about that package again. Dependencies never
+  surface: only what you asked for counts.
+- **Auditable roots.** `wukong pkg providers` shows every provider's
+  watched root, how it was found (fixed, probed once at startup, or
+  a config override), and what it currently sees — the standing
+  answer to "why isn't X being offered?". `wukong pkg list` shows
+  installed versions straight from the receipts.
 - **Symmetry on the way out.** Uninstall a manifest package behind
   wukong's back and the inbox asks whether to drop it or keep it for
   reinstall.
 - **The new-machine answer.** `wukong pkg sync` installs everything in
   the manifest that's missing, each package through its own manager —
   it shows the exact commands first, and `--dry-run` stops there.
-  Apps it can remember but not install come back as a checklist.
-  `wukong pkg adopt-installed` bulk-imports an existing machine's
-  whole package world on day one.
+  App Store apps install by the id wukong captured at adoption;
+  anything it can only remember comes back as a checklist. `wukong
+  pkg adopt-installed` bulk-imports an existing machine's whole
+  package world on day one.
 
 ### Settings
 
@@ -146,9 +155,8 @@ database in `~/.local/share/wukong`, the socket in `~/.local/state`.
 
 ## Roadmap
 
-- Providers without stable on-disk receipts: mas (no receipt dir),
-  gem and go (version-mangled paths). Deliberately out until the
-  detection can be as boring as the rest.
+- pip stays out on purpose: PEP 668 made pip refuse global installs
+  on modern systems, and pipx/uv are its governed successors here.
 - The GUI, as a third client of the same daemon socket.
 
 ## Development
