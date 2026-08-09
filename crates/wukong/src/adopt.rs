@@ -77,7 +77,10 @@ pub fn run(yes: bool) -> anyhow::Result<()> {
         return Ok(());
     }
     for f in &found {
-        match client::call(Request::Track { path: f.clone() })? {
+        match client::call(Request::Track {
+            path: f.clone(),
+            sealed: false,
+        })? {
             Response::Ok { message } => println!("{message}"),
             Response::Error { message } => eprintln!("  skipped: {message}"),
             _ => {}

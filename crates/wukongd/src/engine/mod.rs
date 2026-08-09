@@ -64,6 +64,11 @@ pub struct Engine {
     watch_requests: Vec<(PathBuf, bool)>,
     /// Canonical live paths of tracked files: the hot-path roster.
     tracked_live: HashSet<PathBuf>,
+    /// The subset stored as age ciphertext.
+    sealed_live: HashSet<PathBuf>,
+    /// The public recipient every sealed commit encrypts to, loaded
+    /// from the store (created on first seal).
+    recipient: Option<String>,
     sentinel_files: Vec<PathBuf>,
     sentinel_dirs: Vec<PathBuf>,
     excludes: Vec<PathBuf>,
@@ -90,6 +95,21 @@ pub struct Engine {
     capture: Option<(Instant, PrefsSnapshot)>,
 }
 
+/// The tracked roster and its sealed subset, as canonical live paths.
+fn roster(db: &Db) -> anyhow::Result<(HashSet<PathBuf>, HashSet<PathBuf>)> {
+    let rows = db.tracked()?;
+    let tracked = rows
+        .iter()
+        .map(|(rel, _)| paths::from_store_rel(Path::new(rel)))
+        .collect();
+    let sealed = rows
+        .iter()
+        .filter(|(_, sealed)| *sealed)
+        .map(|(rel, _)| paths::from_store_rel(Path::new(rel)))
+        .collect();
+    Ok((tracked, sealed))
+}
+
 /// Every (domain, key) → scalar value at one moment in time.
 type PrefsSnapshot = std::collections::BTreeMap<(String, String), wukong_core::settings::Value>;
 
@@ -102,11 +122,10 @@ impl Engine {
             store.ensure_remote(&config.remote)?;
         }
         db.record(EventKind::DaemonStarted, &config.machine, "")?;
-        let tracked_live = db
-            .tracked()?
-            .iter()
-            .map(|rel| paths::from_store_rel(Path::new(rel)))
-            .collect();
+        let (tracked_live, sealed_live) = roster(&db)?;
+        let recipient = std::fs::read_to_string(store.dir().join(wukong_core::seal::RECIPIENT_REL))
+            .ok()
+            .map(|s| s.trim().to_string());
         let (mut sentinel_files, mut sentinel_dirs) = (Vec::new(), Vec::new());
         for s in config.sentinel_paths() {
             if s.is_dir() {
@@ -178,6 +197,8 @@ impl Engine {
             manifest_poisoned,
             watch_requests: Vec::new(),
             tracked_live,
+            sealed_live,
+            recipient,
             sentinel_files,
             sentinel_dirs,
             excludes,
@@ -378,6 +399,9 @@ impl Engine {
             )));
             return 0;
         }
+        if self.sealed_live.contains(path) {
+            return self.commit_sealed(path, rel, &bytes);
+        }
         let scanned = gate::scan_bytes(path, &bytes);
         let content = scanned.text.as_str();
 
@@ -479,6 +503,142 @@ impl Engine {
                 soft(self.db.record(EventKind::Held, rel, "commit failed"));
                 soft(Err::<(), _>(e));
             }
+        }
+    }
+
+    /// The sealed lane: no gate scan (the whole point is that secrets
+    /// live here), no plaintext in the store — and a content-hash
+    /// guard, because age ciphertext differs on every encryption and
+    /// would otherwise commit forever.
+    fn commit_sealed(&mut self, path: &Path, rel: &str, plaintext: &[u8]) -> usize {
+        let hash = wukong_core::seal::content_hash(plaintext);
+        if self.db.content_hash(rel).ok().flatten().as_deref() == Some(hash.as_str()) {
+            return 0;
+        }
+        let Some(recipient) = self.ensure_recipient() else {
+            soft(Err::<(), _>(format!(
+                "{rel}: no seal recipient — not committed"
+            )));
+            return 0;
+        };
+        let sealed = match wukong_core::seal::encrypt(&recipient, plaintext) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                soft(Err::<(), _>(e));
+                return 0;
+            }
+        };
+        match self.store.mirror_in(path, &sealed) {
+            Ok(rel_path) => {
+                self.commit_scoped(&rel_path, &format!("{rel}: sealed update"), rel, "sealed");
+                soft(self.db.set_content_hash(rel, &hash));
+            }
+            Err(e) => soft(Err::<(), _>(e)),
+        }
+        0
+    }
+
+    /// The recipient, creating the whole key pair on first use: the
+    /// identity goes to the configured store (Keychain by default),
+    /// the public recipient into the store repo so every clone can
+    /// encrypt.
+    fn ensure_recipient(&mut self) -> Option<String> {
+        if let Some(r) = &self.recipient {
+            return Some(r.clone());
+        }
+        let id_store = wukong_core::seal::IdentityStore::from_config(
+            self.config.seal.identity_file.as_deref(),
+        );
+        match id_store.load() {
+            Ok(Some(_)) => {
+                // An identity exists but the recipient file is missing
+                // (fresh clone without the recipient? repaired store):
+                // we cannot derive the recipient from here without the
+                // identity API — regenerate is WRONG. Ask the user.
+                soft(Err::<(), _>(
+                    "seal identity exists but __wukong__/age.recipient is missing — run `wukong seal-key status`",
+                ));
+                None
+            }
+            Ok(None) => {
+                let (identity, recipient) = wukong_core::seal::generate();
+                if let Err(e) = id_store.save(&identity) {
+                    soft(Err::<(), _>(e));
+                    return None;
+                }
+                let path = self.store.dir().join(wukong_core::seal::RECIPIENT_REL);
+                if let Some(dir) = path.parent() {
+                    soft(std::fs::create_dir_all(dir));
+                }
+                soft(std::fs::write(&path, format!("{recipient}\n")));
+                self.commit_scoped(
+                    Path::new(wukong_core::seal::RECIPIENT_REL),
+                    "seal: recipient established",
+                    "seal",
+                    "recipient established",
+                );
+                soft(
+                    self.db
+                        .record(EventKind::Sealed, "seal", "key pair created"),
+                );
+                self.recipient = Some(recipient.clone());
+                Some(recipient)
+            }
+            Err(e) => {
+                soft(Err::<(), _>(e));
+                None
+            }
+        }
+    }
+
+    /// Convert a tracked file to the sealed lane and commit ciphertext.
+    fn seal(&mut self, path: &str) -> Response {
+        let live = paths::resolve_input(path);
+        if !self.tracked_live.contains(&live) {
+            return Response::Error {
+                message: format!(
+                    "{} is not tracked — `wukong track --sealed` does both at once",
+                    paths::display(&live)
+                ),
+            };
+        }
+        let rel = paths::store_rel(&live).to_string_lossy().into_owned();
+        soft(self.db.set_sealed(&rel, true));
+        soft(self.db.set_content_hash(&rel, "")); // force the first sealed commit
+        self.sealed_live.insert(live.clone());
+        soft(self.db.record(EventKind::Sealed, &rel, ""));
+        self.commit_tracked(&live, &rel);
+        Response::Ok {
+            message: format!(
+                "{} is sealed — the store holds only ciphertext from now on",
+                paths::display(&live)
+            ),
+        }
+    }
+
+    /// Back to the plaintext lane — through the gate, which may
+    /// quarantine what the seal was hiding.
+    fn unseal(&mut self, path: &str) -> Response {
+        let live = paths::resolve_input(path);
+        let rel = paths::store_rel(&live).to_string_lossy().into_owned();
+        if !self.sealed_live.remove(&live) {
+            return Response::Error {
+                message: format!("{} is not sealed", paths::display(&live)),
+            };
+        }
+        soft(self.db.set_sealed(&rel, false));
+        soft(self.db.set_content_hash(&rel, ""));
+        soft(self.db.record(EventKind::Unsealed, &rel, ""));
+        let held = self.commit_tracked(&live, &rel);
+        Response::Ok {
+            message: if held > 0 {
+                format!(
+                    "{} unsealed — its secrets are now HELD in the inbox for review",
+                    paths::display(&live)
+                )
+            } else {
+                format!("{} unsealed and committed plaintext", paths::display(&live))
+            },
         }
     }
 
@@ -606,7 +766,7 @@ impl Engine {
                 daemon_version: env!("CARGO_PKG_VERSION").to_string(),
             },
             Request::Status => self.status(),
-            Request::Track { path } => self.track(&path),
+            Request::Track { path, sealed } => self.track(&path, sealed),
             Request::Untrack { path } => self.untrack(&path),
             Request::TrackedList => self.tracked_list(),
             Request::InboxList => match self.db.inbox_open() {
@@ -632,6 +792,8 @@ impl Engine {
                 unignore,
             } => self.pkg_ignore(provider, &name, unignore),
             Request::PkgAdoptInstalled => self.pkg_adopt_installed(),
+            Request::Seal { path } => self.seal(&path),
+            Request::Unseal { path } => self.unseal(&path),
             Request::SettingsList => self.settings_list(),
             Request::SettingsRecord { domain, key } => self.settings_record(&domain, &key),
             Request::SettingsIgnore {
@@ -668,9 +830,10 @@ impl Engine {
         })
     }
 
-    /// Track a live path: resolve it, refuse forbidden files, mirror
-    /// and commit the current content immediately.
-    fn track(&mut self, path: &str) -> Response {
+    /// Track a live path: resolve it, refuse forbidden files (unless
+    /// sealed — ciphertext-only storage is exactly what makes a
+    /// forbidden name safe to govern), mirror and commit immediately.
+    fn track(&mut self, path: &str, sealed: bool) -> Response {
         let live = paths::resolve_input(path);
         if !live.is_file() {
             return Response::Error {
@@ -696,15 +859,24 @@ impl Engine {
             }
         };
         let content = String::from_utf8_lossy(&bytes);
-        if let GateVerdict::Forbidden(why) = gate::scan(&live, &content) {
+        if !sealed && let GateVerdict::Forbidden(why) = gate::scan(&live, &content) {
             return Response::Error {
-                message: format!("refused: {} ({why})", paths::display(&live)),
+                message: format!(
+                    "refused: {} ({why}) — `wukong track --sealed` stores it as ciphertext only",
+                    paths::display(&live)
+                ),
             };
         }
         let rel = paths::store_rel(&live).to_string_lossy().into_owned();
-        match self.db.track(&rel) {
+        match self.db.track(&rel, sealed) {
             Ok(_) => {
-                soft(self.db.record(EventKind::Tracked, &rel, ""));
+                soft(
+                    self.db
+                        .record(EventKind::Tracked, &rel, if sealed { "sealed" } else { "" }),
+                );
+                if sealed {
+                    self.sealed_live.insert(live.clone());
+                }
                 self.adopt(&live);
                 // Commit whatever is clean now; a quarantine lands in
                 // the inbox but the file stays tracked.
@@ -732,6 +904,7 @@ impl Engine {
         match self.db.untrack(&rel) {
             Ok(true) => {
                 self.tracked_live.remove(&live);
+                self.sealed_live.remove(&live);
                 soft(self.store.remove(&live));
                 let rel_path = paths::store_rel(&live);
                 self.commit_scoped(&rel_path, &format!("{rel}: untracked"), &rel, "untracked");
@@ -749,14 +922,15 @@ impl Engine {
 
     fn tracked_list(&self) -> Response {
         match self.db.tracked() {
-            Ok(paths) => Response::Tracked {
-                files: paths
+            Ok(rows) => Response::Tracked {
+                files: rows
                     .into_iter()
-                    .map(|rel| {
+                    .map(|(rel, sealed)| {
                         let live = paths::from_store_rel(Path::new(&rel));
                         TrackedFile {
                             display: paths::display(&live),
                             exists: live.exists(),
+                            sealed,
                             path: rel,
                         }
                     })
@@ -783,6 +957,13 @@ impl Engine {
         // Setting items likewise; the offered value rides in meta.
         if kind == Some(InboxKind::Setting) {
             return self.resolve_setting(id, &item.meta, resolution);
+        }
+        if resolution == Resolution::Seal && kind != Some(InboxKind::Quarantine) {
+            return Response::Error {
+                message: "seal applies to quarantined secrets — for a sentinel offer, \
+`wukong track --sealed` the file instead"
+                    .to_string(),
+            };
         }
 
         // Guard at the moment of consequence: offers skip forbidden
@@ -811,7 +992,7 @@ impl Engine {
 
         // Sentinel + approve means "start tracking".
         if kind == Some(InboxKind::Sentinel) && resolution == Resolution::Approve {
-            soft(self.db.track(&item.subject));
+            soft(self.db.track(&item.subject, false));
             soft(
                 self.db
                     .record(EventKind::Tracked, &item.subject, "from inbox"),
@@ -832,6 +1013,18 @@ impl Engine {
                 soft(self.db.allow(&item.subject, &fp, resolution.as_str()));
             }
             self.commit_tracked(&live, &item.subject);
+        }
+
+        // Quarantine + seal: the whole file moves to the ciphertext
+        // lane; the held findings become moot (plaintext never reaches
+        // git again).
+        if kind == Some(InboxKind::Quarantine) && resolution == Resolution::Seal {
+            let rel = item.subject.clone();
+            soft(self.db.set_sealed(&rel, true));
+            soft(self.db.set_content_hash(&rel, ""));
+            self.sealed_live.insert(live.clone());
+            soft(self.db.record(EventKind::Sealed, &rel, "from inbox"));
+            self.commit_tracked(&live, &rel);
         }
 
         Response::Ok {
@@ -878,14 +1071,34 @@ impl Engine {
                 message: format!("{} is not tracked", paths::display(&live)),
             };
         }
-        let content = match std::fs::read(&live) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        let bytes = match std::fs::read(&live) {
+            Ok(bytes) => bytes,
             Err(e) => {
                 return Response::Error {
                     message: e.to_string(),
                 };
             }
         };
+        if self.sealed_live.contains(&live) {
+            let rel = paths::store_rel(&live).to_string_lossy().into_owned();
+            let live_hash = wukong_core::seal::content_hash(&bytes);
+            let synced =
+                self.db.content_hash(&rel).ok().flatten().as_deref() == Some(live_hash.as_str());
+            return Response::Ok {
+                message: if synced {
+                    format!(
+                        "{} is sealed; content matches the store",
+                        paths::display(&live)
+                    )
+                } else {
+                    format!(
+                        "{} is sealed; content DIFFERS from the store (plaintext diff withheld)",
+                        paths::display(&live)
+                    )
+                },
+            };
+        }
+        let content = String::from_utf8_lossy(&bytes).into_owned();
         let diff = self.store.diff_against_live(&live, &content);
         Response::Ok {
             message: if diff.is_empty() {
@@ -940,10 +1153,28 @@ impl Engine {
                 continue;
             }
             let rel_str = rel.to_string_lossy().into_owned();
-            let Ok(stored) = std::fs::read(self.store.dir().join(&rel)) else {
+            let Ok(mut stored) = std::fs::read(self.store.dir().join(&rel)) else {
                 skipped.push(format!("{rel_str} (not in store)"));
                 continue;
             };
+            if wukong_core::seal::is_sealed(&stored) {
+                let id_store = wukong_core::seal::IdentityStore::from_config(
+                    self.config.seal.identity_file.as_deref(),
+                );
+                let Some(identity) = id_store.load().ok().flatten() else {
+                    skipped.push(format!(
+                        "{rel_str} (sealed — import the key with `wukong seal-key import`)"
+                    ));
+                    continue;
+                };
+                match wukong_core::seal::decrypt(&identity, &stored) {
+                    Ok(plain) => stored = plain,
+                    Err(e) => {
+                        skipped.push(format!("{rel_str} (decrypt failed: {e})"));
+                        continue;
+                    }
+                }
+            }
             let live = paths::from_store_rel(&rel);
             let differs = std::fs::read(&live).is_ok_and(|b| b != stored);
             if differs && !force {
@@ -963,7 +1194,13 @@ impl Engine {
                 skipped.push(format!("{} (write failed)", paths::display(&live)));
                 continue;
             }
-            soft(self.db.track(&rel_str));
+            let was_sealed = wukong_core::seal::is_sealed(
+                &std::fs::read(self.store.dir().join(&rel)).unwrap_or_default(),
+            );
+            soft(self.db.track(&rel_str, was_sealed));
+            if was_sealed {
+                self.sealed_live.insert(live.clone());
+            }
             self.adopt(&live);
             soft(self.db.record(EventKind::Restored, &rel_str, ""));
             restored += 1;

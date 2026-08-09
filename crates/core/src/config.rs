@@ -35,6 +35,16 @@ pub struct Config {
     pub packages: Packages,
     /// Settings governance knobs.
     pub settings: Settings,
+    /// Sealed-lane knobs.
+    pub seal: Seal,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Seal {
+    /// Keep the age identity in this file instead of the macOS
+    /// Keychain (sandboxed runs, or your own key discipline).
+    pub identity_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,6 +100,7 @@ impl Default for Config {
             exclude: vec!["~/.config/wukong".to_string()],
             packages: Packages::default(),
             settings: Settings::default(),
+            seal: Seal::default(),
         }
     }
 }
@@ -278,6 +289,11 @@ enabled = true
 [settings]
 enabled = true
 # preferences_dir = "/tmp/prefs"     # override ~/Library/Preferences
+
+# The sealed lane: files whose secrets sync as age ciphertext only.
+# The private identity lives in the macOS Keychain by default.
+[seal]
+# identity_file = "~/somewhere/age.key"  # file instead of Keychain
 "#,
         machine = esc(machine),
         remote = esc(remote),
@@ -301,6 +317,7 @@ mod tests {
         assert_eq!(parsed.notifications, defaults.notifications);
         assert_eq!(parsed.packages, defaults.packages);
         assert_eq!(parsed.settings, defaults.settings);
+        assert_eq!(parsed.seal, defaults.seal);
     }
 
     #[test]

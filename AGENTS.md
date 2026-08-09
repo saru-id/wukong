@@ -22,6 +22,13 @@ application that may sit nearby on disk as `../wukong-backup`).
   `gate::scan` clearing it. Never add a path that commits file content
   without going through the gate. New credential patterns are welcome;
   weakening the gate is not.
+- **The sealed lane never touches plaintext in the store.** Sealed
+  commits are gated on a plaintext SHA-256 (age is non-deterministic —
+  without the hash guard, unchanged files would commit forever). The
+  identity is NEVER in the store; the recipient always is. Sealed
+  tracking is the only path that may bypass the forbidden-name refusal
+  — because ciphertext-only storage is exactly what makes those names
+  safe. Unseal goes back through the gate and may quarantine.
 - **Resolutions are sticky, per fingerprint.** Approve/redact store a
   (path, fingerprint, action) allowance the engine applies on every
   scan. The redacted store copy is re-scanned before commit and held if

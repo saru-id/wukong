@@ -201,9 +201,9 @@ impl Engine {
         meta: &str,
         resolution: Resolution,
     ) -> Response {
-        if resolution == Resolution::Redact {
+        if matches!(resolution, Resolution::Redact | Resolution::Seal) {
             return Response::Error {
-                message: "redact does not apply to settings — approve or ignore".to_string(),
+                message: "only approve or ignore applies to settings".to_string(),
             };
         }
         let Ok(meta) = serde_json::from_str::<SettingMeta>(meta) else {
@@ -239,7 +239,7 @@ impl Engine {
                 );
                 self.commit_settings_manifest(&format!("ignore {} {}", meta.domain, meta.key));
             }
-            Resolution::Redact => unreachable!("rejected above"),
+            Resolution::Redact | Resolution::Seal => unreachable!("rejected above"),
         }
         Response::Ok {
             message: format!("resolved {subject} ({})", resolution.as_str()),

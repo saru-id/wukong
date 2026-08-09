@@ -25,6 +25,9 @@ push_interval_secs = 3600
 sentinels = ["~/.zshrc", "~/.zprofile", "~/.config"]
 notifications = false
 exclude = ["~/.config/wukong"]
+
+[seal]
+identity_file = "$ROOT/age.key"
 EOF
 
 DB="$XDG_DATA_HOME/wukong/wukong.db"
@@ -89,6 +92,30 @@ sleep 2.5
 check "redaction sticky on next edit" "! grep -q '$HEX' '$STORE/.gitconfig-custom' && grep -q 'export H=2' '$STORE/.gitconfig-custom'"
 check "no re-quarantine after redact" "[ \"\$(sqlite3 '$DB' 'SELECT COUNT(*) FROM inbox WHERE resolved=0')\" = 0 ]"
 
+echo "=== sealed lane: forbidden file, ciphertext-only store"
+SEALTOK=ghp_sealedrilltokensealedrilltoken00
+printf 'TOKEN=%s\n' "$SEALTOK" > "$HOME/.env"
+check "plaintext tracking of .env refused" "! \"$W\" track ~/.env > /dev/null 2>&1"
+"$W" track --sealed ~/.env > /dev/null
+sleep 1
+check "store holds age ciphertext" "head -c 21 '$STORE/.env' | grep -q 'age-encryption.org'"
+check "plaintext never in store" "! grep -rq '$SEALTOK' '$STORE' --exclude-dir=.git"
+check "identity NOT in the store" "[ ! -e '$STORE/age.key' ] && ! git -C '$STORE' ls-files | grep -q age.key"
+check "recipient IS in the store" "git -C '$STORE' ls-files | grep -q 'age.recipient'"
+COMMITS_BEFORE=$(git -C "$STORE" log --oneline -- .env | wc -l | tr -d ' ')
+touch "$HOME/.env"
+sleep 2.5
+COMMITS_AFTER=$(git -C "$STORE" log --oneline -- .env | wc -l | tr -d ' ')
+check "unchanged sealed file does not re-commit" "[ \"\$COMMITS_BEFORE\" = \"\$COMMITS_AFTER\" ]"
+printf 'TOKEN=%s\nEXTRA=1\n' "$SEALTOK" > "$HOME/.env"
+sleep 2.5
+check "edited sealed file commits, no quarantine" "[ \"\$(git -C '$STORE' log --oneline -- .env | wc -l | tr -d ' ')\" -gt \"\$COMMITS_AFTER\" ] && [ \"\$(sqlite3 '$DB' 'SELECT COUNT(*) FROM inbox WHERE resolved=0')\" = 0 ]"
+rm "$HOME/.env"
+sleep 0.5
+"$W" restore ~/.env --force > /dev/null 2>&1 || "$W" restore ~/.env > /dev/null
+check "restore decrypts the sealed file" "grep -q '$SEALTOK' '$HOME/.env'"
+check "seal-key status reports a match" "\"$W\" seal-key status | grep -q 'unlocks this store'"
+
 echo "=== sentinel discovery + forbidden skip"
 echo 'eval brew shellenv' > "$HOME/.zprofile"
 mkdir -p "$HOME/.config/sometool"
@@ -104,6 +131,8 @@ check "push reports real result" "echo \"\$OUT\" | grep -q '^pushed$'"
 git clone -q -b sandbox "$ROOT/remote.git" "$ROOT/verify"
 check "remote has approved token (deliberate)" "grep -q '$TOKEN' '$ROOT/verify/.zshrc'"
 check "remote never saw redacted hex"          "! git -C '$ROOT/verify' log -p --all | grep -q '$HEX'"
+check "remote never saw the sealed token"      "! git -C '$ROOT/verify' log -p --all | grep -q '$SEALTOK'"
+check "remote's .env is ciphertext" "head -c 21 '$ROOT/verify/.env' | grep -q 'age-encryption.org'"
 
 echo "=== noise valve: wukong exclude"
 mkdir -p "$HOME/.config/noisyapp"

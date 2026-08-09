@@ -137,6 +137,10 @@ wukong track ~/.zshrc ~/.gitconfig ~/.config/starship.toml")]
         /// One or more files to govern
         #[arg(required = true, value_name = "PATH")]
         paths: Vec<String>,
+        /// Store as age ciphertext only — the sealed lane. Also the
+        /// only way to track credential-named files (.env, .netrc…)
+        #[arg(long)]
+        sealed: bool,
     },
 
     /// Find this machine's well-known dotfiles and track them all
@@ -192,6 +196,41 @@ store agree."
         /// How many commits to show
         #[arg(short = 'n', long, default_value_t = 20, value_name = "COUNT")]
         limit: usize,
+    },
+
+    /// Move a tracked file to the sealed lane (ciphertext-only store)
+    #[command(
+        long_about = "Convert a tracked file to the sealed lane: from now on the store \
+holds only age ciphertext, so the remote never sees its plaintext. The \
+live file is untouched. The first seal on a machine creates the key \
+pair: the private identity goes to the macOS Keychain (or the \
+configured identity file), the public recipient into the store so \
+every clone can encrypt. Move the identity to other machines with \
+`wukong seal-key export` / `import`."
+    )]
+    Seal {
+        /// A tracked file
+        #[arg(value_name = "PATH")]
+        path: String,
+    },
+
+    /// Return a sealed file to the plaintext lane, back through the gate
+    #[command(
+        long_about = "Return a sealed file to the plaintext lane. The content goes back \
+through the secret gate — anything it finds is HELD in the inbox for \
+review, exactly as if the file were newly tracked."
+    )]
+    Unseal {
+        /// A sealed file
+        #[arg(value_name = "PATH")]
+        path: String,
+    },
+
+    /// Manage the seal identity (export, import, status)
+    #[command(subcommand_value_name = "ACTION")]
+    SealKey {
+        #[command(subcommand)]
+        action: SealKeyAction,
     },
 
     /// Stop tracking a file
@@ -343,6 +382,22 @@ tracked/inbox/unpushed counts and the last push age."
         #[arg(value_enum, value_name = "SHELL")]
         shell: clap_complete::Shell,
     },
+}
+
+#[derive(Subcommand)]
+pub enum SealKeyAction {
+    /// Print the private identity for transfer to another machine
+    #[command(
+        long_about = "Print the age identity to stdout — the ONE secret that unlocks \
+every sealed file. Move it to another machine through a channel you \
+trust (password manager, AirDrop), then `wukong seal-key import` \
+there. Anyone holding this line can read your sealed files."
+    )]
+    Export,
+    /// Read an identity from stdin and store it on this machine
+    Import,
+    /// Is the identity present, and does the recipient match?
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -522,6 +577,8 @@ enum ResolutionArg {
     Redact,
     /// Set aside (for package offers: permanently)
     Ignore,
+    /// Quarantines only: the whole file moves to the ciphertext lane
+    Seal,
 }
 
 impl From<ResolutionArg> for Resolution {
@@ -530,6 +587,74 @@ impl From<ResolutionArg> for Resolution {
             ResolutionArg::Approve => Resolution::Approve,
             ResolutionArg::Redact => Resolution::Redact,
             ResolutionArg::Ignore => Resolution::Ignore,
+            ResolutionArg::Seal => Resolution::Seal,
+        }
+    }
+}
+
+/// seal-key runs CLI-side: the identity store and the store repo are
+/// both reachable without the daemon.
+fn seal_key(action: &SealKeyAction) -> anyhow::Result<()> {
+    use wukong_core::{paths, seal};
+    let config = match wukong_core::Config::load() {
+        Ok(Some(config)) => config,
+        _ => wukong_core::Config::default(),
+    };
+    let store = seal::IdentityStore::from_config(config.seal.identity_file.as_deref());
+    let recipient_path = paths::store_dir().join(seal::RECIPIENT_REL);
+    match action {
+        SealKeyAction::Export => match store.load()? {
+            Some(identity) => {
+                eprintln!("# The one secret that unlocks every sealed file. Guard it.");
+                println!("{identity}");
+                Ok(())
+            }
+            None => anyhow::bail!("no seal identity on this machine"),
+        },
+        SealKeyAction::Import => {
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            let identity = line.trim();
+            if !identity.starts_with("AGE-SECRET-KEY-1") {
+                anyhow::bail!("that does not look like an age identity");
+            }
+            // Prove it decrypts what this store encrypts, when a
+            // recipient exists to check against.
+            if let Ok(recipient) = std::fs::read_to_string(&recipient_path) {
+                let probe = seal::encrypt(recipient.trim(), b"probe")?;
+                if seal::decrypt(identity, &probe).is_err() {
+                    anyhow::bail!("identity does not match this store's recipient — wrong key?");
+                }
+            }
+            store.save(identity)?;
+            println!("seal identity imported");
+            Ok(())
+        }
+        SealKeyAction::Status => {
+            let has_identity = store.load()?.is_some();
+            let recipient = std::fs::read_to_string(&recipient_path).ok();
+            println!(
+                "identity   {}",
+                if has_identity { "present" } else { "missing" }
+            );
+            match &recipient {
+                Some(r) => println!("recipient  {}", r.trim()),
+                None => println!("recipient  (none — nothing sealed yet)"),
+            }
+            if let (true, Some(r)) = (has_identity, &recipient) {
+                let identity = store.load()?.expect("checked");
+                let probe = seal::encrypt(r.trim(), b"probe")?;
+                let matches = seal::decrypt(&identity, &probe).is_ok();
+                println!(
+                    "match      {}",
+                    if matches {
+                        "identity unlocks this store"
+                    } else {
+                        "MISMATCH — this identity cannot decrypt this store"
+                    }
+                );
+            }
+            Ok(())
         }
     }
 }
@@ -575,12 +700,15 @@ fn main() -> anyhow::Result<()> {
             SettingsAction::Ignore { domain, key } => settings_cli::ignore(&domain, &key, false),
             SettingsAction::Unignore { domain, key } => settings_cli::ignore(&domain, &key, true),
         },
-        Some(Command::Track { paths }) => {
+        Some(Command::Track { paths, sealed }) => {
             for path in paths {
-                say(Request::Track { path })?;
+                say(Request::Track { path, sealed })?;
             }
             Ok(())
         }
+        Some(Command::Seal { path }) => say(Request::Seal { path }),
+        Some(Command::Unseal { path }) => say(Request::Unseal { path }),
+        Some(Command::SealKey { action }) => seal_key(&action),
         Some(Command::AdoptDotfiles { yes }) => adopt::run(yes),
         Some(Command::Exclude { path }) => say(Request::Exclude { path }),
         Some(Command::Diff { path }) => say(Request::Diff { path }),

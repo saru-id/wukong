@@ -37,7 +37,7 @@ fn rig() -> Rig {
 fn track(rig: &mut Rig, name: &str, content: &str) -> PathBuf {
     let file = rig.home.join(name);
     std::fs::write(&file, content).unwrap();
-    let resp = rig.engine.track(file.to_str().unwrap());
+    let resp = rig.engine.track(file.to_str().unwrap(), false);
     assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
     file
 }
@@ -158,7 +158,7 @@ fn track_refuses_forbidden() {
     let mut rig = rig();
     let env = rig.home.join(".env");
     std::fs::write(&env, "SECRET=x").unwrap();
-    let resp = rig.engine.track(env.to_str().unwrap());
+    let resp = rig.engine.track(env.to_str().unwrap(), false);
     assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
 }
 
@@ -475,7 +475,7 @@ fn exclude_silences_a_subtree_and_resolves_open_offers() {
     // Tracking still outranks excluding.
     let tracked = home.join("config-tree/noisyapp/keep.conf");
     std::fs::write(&tracked, "keep=1\n").unwrap();
-    let resp = engine.track(tracked.to_str().unwrap());
+    let resp = engine.track(tracked.to_str().unwrap(), false);
     assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
     std::fs::write(&tracked, "keep=2\n").unwrap();
     engine.touch(tracked.clone());
@@ -806,4 +806,156 @@ fn capture_then_record_makes_the_key_governed() {
         plist::Value::String("off".into()),
     );
     assert_eq!(rig.engine.reconcile_settings(), 1);
+}
+
+/// A rig whose seal identity lives in a tempdir file (no Keychain).
+fn seal_rig() -> Rig {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut config = Config {
+        machine: "testbox".to_string(),
+        debounce_secs: 0,
+        ..Config::default()
+    };
+    config.seal.identity_file = Some(root.join("age.key"));
+    let engine = Engine::new(config, &root.join("wukong.db"), &root.join("store")).unwrap();
+    Rig {
+        engine,
+        home,
+        _guard: tmp,
+    }
+}
+
+const SEALED_SECRET: &str = "ghp_sealedsealedsealedsealedsealed01";
+
+#[test]
+fn sealed_track_stores_ciphertext_only_with_hash_guard() {
+    let mut rig = seal_rig();
+    let file = rig.home.join(".env");
+    std::fs::write(&file, format!("TOKEN={SEALED_SECRET}\n")).unwrap();
+
+    // .env is forbidden plaintext — but sealed tracking is the point.
+    assert!(matches!(
+        rig.engine.track(file.to_str().unwrap(), false),
+        Response::Error { .. }
+    ));
+    let resp = rig.engine.track(file.to_str().unwrap(), true);
+    assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
+
+    // The store holds age ciphertext, never the plaintext.
+    let stored = std::fs::read(rig.engine.store.dir().join(paths::store_rel(&file))).unwrap();
+    assert!(wukong_core::seal::is_sealed(&stored));
+    assert!(
+        !stored
+            .windows(SEALED_SECRET.len())
+            .any(|w| w == SEALED_SECRET.as_bytes())
+    );
+    // The recipient landed in the store; the identity did NOT.
+    assert!(
+        rig.engine
+            .store
+            .dir()
+            .join(wukong_core::seal::RECIPIENT_REL)
+            .exists()
+    );
+    assert!(
+        !rig.engine.store.dir().join("age.key").exists()
+            && !rig
+                .engine
+                .store
+                .files()
+                .unwrap()
+                .iter()
+                .any(|f| f.to_string_lossy().contains("age.key"))
+    );
+
+    // Determinism guard: an unchanged file must not re-commit
+    // (ciphertext would differ every time).
+    let before = rig
+        .engine
+        .store
+        .log(&paths::store_rel(&file), 10)
+        .unwrap()
+        .lines()
+        .count();
+    rig.engine.touch(file.clone());
+    rig.engine.tick();
+    let after = rig
+        .engine
+        .store
+        .log(&paths::store_rel(&file), 10)
+        .unwrap()
+        .lines()
+        .count();
+    assert_eq!(before, after, "unchanged sealed file re-committed");
+
+    // A real edit commits (as ciphertext) — and never quarantines.
+    std::fs::write(&file, format!("TOKEN={SEALED_SECRET}\nMORE=1\n")).unwrap();
+    rig.engine.touch(file.clone());
+    assert_eq!(rig.engine.tick(), 0);
+    assert_eq!(
+        rig.engine
+            .store
+            .log(&paths::store_rel(&file), 10)
+            .unwrap()
+            .lines()
+            .count(),
+        after + 1
+    );
+}
+
+#[test]
+fn restore_decrypts_sealed_files_and_keeps_them_sealed() {
+    let mut rig = seal_rig();
+    let file = rig.home.join(".env");
+    let plaintext = format!("TOKEN={SEALED_SECRET}\n");
+    std::fs::write(&file, &plaintext).unwrap();
+    rig.engine.track(file.to_str().unwrap(), true);
+
+    std::fs::remove_file(&file).unwrap();
+    // Removing tracked state simulates a fresh machine with the store
+    // and the key, but no roster.
+    rig.engine.tracked_live.clear();
+    rig.engine.sealed_live.clear();
+    let resp = rig.engine.restore(Some(file.to_str().unwrap()), false);
+    assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), plaintext);
+    assert!(rig.engine.sealed_live.contains(&file));
+}
+
+#[test]
+fn quarantine_seal_resolution_moves_the_file_to_the_sealed_lane() {
+    let mut rig = seal_rig();
+    let file = track(&mut rig, ".zshrc", "export A=1\n");
+    edit_and_settle(&mut rig, &file, &format!("export T={SEALED_SECRET}\n"));
+    let item_id = rig.engine.db.inbox_open().unwrap()[0].id;
+    rig.engine.resolve(item_id, Resolution::Seal);
+
+    let stored = std::fs::read(rig.engine.store.dir().join(paths::store_rel(&file))).unwrap();
+    assert!(wukong_core::seal::is_sealed(&stored));
+    // Sticky: further edits stay ciphertext, no re-quarantine.
+    let n = edit_and_settle(&mut rig, &file, &format!("export T={SEALED_SECRET}\nB=2\n"));
+    assert_eq!(n, 0);
+    assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
+    let stored = std::fs::read(rig.engine.store.dir().join(paths::store_rel(&file))).unwrap();
+    assert!(wukong_core::seal::is_sealed(&stored));
+}
+
+#[test]
+fn unseal_goes_back_through_the_gate() {
+    let mut rig = seal_rig();
+    let file = rig.home.join(".sealed-config");
+    std::fs::write(&file, format!("export T={SEALED_SECRET}\n")).unwrap();
+    rig.engine.track(file.to_str().unwrap(), true);
+    let resp = rig.engine.unseal(file.to_str().unwrap());
+    assert!(matches!(resp, Response::Ok { .. }));
+    // The secret is now HELD — plaintext did not slip into the store.
+    assert_eq!(rig.engine.db.inbox_count().unwrap(), 1);
+    let stored = std::fs::read(rig.engine.store.dir().join(paths::store_rel(&file))).unwrap();
+    assert!(
+        wukong_core::seal::is_sealed(&stored),
+        "store must still hold the last sealed blob, not plaintext"
+    );
 }

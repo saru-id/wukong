@@ -34,6 +34,8 @@ pub enum EventKind {
     PkgGone,
     SettingRecorded,
     SettingIgnored,
+    Sealed,
+    Unsealed,
 }
 
 impl EventKind {
@@ -58,6 +60,8 @@ impl EventKind {
             Self::PkgGone => "pkg-gone",
             Self::SettingRecorded => "setting-recorded",
             Self::SettingIgnored => "setting-ignored",
+            Self::Sealed => "sealed",
+            Self::Unsealed => "unsealed",
         }
     }
 }
@@ -140,6 +144,10 @@ pub enum Resolution {
     /// Quarantine/sentinel: drop the item; it may return when the file
     /// next changes. Package: PERMANENT opt-out via the manifest.
     Ignore,
+    /// Quarantine only: the whole file becomes SEALED — every stored
+    /// copy is age-encrypted from now on, so the remote only ever
+    /// holds ciphertext.
+    Seal,
 }
 
 impl Resolution {
@@ -149,6 +157,7 @@ impl Resolution {
             Self::Approve => "approve",
             Self::Redact => "redact",
             Self::Ignore => "ignore",
+            Self::Seal => "seal",
         }
     }
 
@@ -158,6 +167,7 @@ impl Resolution {
             "approve" => Some(Self::Approve),
             "redact" => Some(Self::Redact),
             "ignore" => Some(Self::Ignore),
+            "seal" => Some(Self::Seal),
             _ => None,
         }
     }

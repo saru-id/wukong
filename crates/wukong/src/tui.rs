@@ -177,6 +177,7 @@ impl App {
             KeyCode::Char('a') if self.tab == Tab::Inbox => self.resolve(Resolution::Approve),
             KeyCode::Char('r') if self.tab == Tab::Inbox => self.resolve(Resolution::Redact),
             KeyCode::Char('i') if self.tab == Tab::Inbox => self.resolve(Resolution::Ignore),
+            KeyCode::Char('s') if self.tab == Tab::Inbox => self.resolve(Resolution::Seal),
             KeyCode::Char('x') if self.tab == Tab::Inbox => self.exclude_selected(),
             KeyCode::Char('R') => self.refresh(),
             _ => {}
@@ -398,7 +399,12 @@ impl App {
                     Style::default().fg(Color::Red)
                 };
                 ListItem::new(Span::styled(
-                    format!(" {} {}", if f.exists { " " } else { "!" }, f.display),
+                    format!(
+                        " {} {}{}",
+                        if f.exists { " " } else { "!" },
+                        f.display,
+                        if f.sealed { "  [sealed]" } else { "" }
+                    ),
                     style,
                 ))
             })

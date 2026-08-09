@@ -378,9 +378,9 @@ impl Engine {
                 message: format!("malformed package subject {subject}"),
             };
         };
-        if resolution == Resolution::Redact {
+        if matches!(resolution, Resolution::Redact | Resolution::Seal) {
             return Response::Error {
-                message: "redact does not apply to packages — approve or ignore".to_string(),
+                message: "only approve or ignore applies to packages".to_string(),
             };
         }
         let name = name.to_string();

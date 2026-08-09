@@ -23,6 +23,13 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
   evidence stored with it is masked, so the database never holds a raw
   secret either. The gate cannot be disabled globally, only per
   finding.
+- **The sealed lane.** Some files are secrets — `.env`, `.netrc`, an
+  API config. Track them `--sealed` (or resolve a quarantine with
+  `seal`) and the store holds only age ciphertext: the remote never
+  sees their plaintext, period. The private identity lives in your
+  Keychain; the public recipient syncs with the store so every machine
+  can encrypt; `wukong seal-key export`/`import` moves the one secret
+  that matters between machines, through a channel you trust.
 - **Resolutions stick.** Every finding has a fingerprint of the secret
   itself. Approve it once and that token commits forever without
   another prompt; redact it once and every future stored copy masks it

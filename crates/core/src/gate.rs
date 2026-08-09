@@ -70,6 +70,7 @@ const FORBIDDEN_NAMES: &[(&str, &str)] = &[
     (".pgpass", "plaintext database passwords"),
     (".my.cnf", "database credentials file"),
     (".pypirc", "package registry credentials"),
+    ("age.key", "age identity"),
 ];
 
 /// Name prefixes for private key files (covers `id_rsa_work` etc.);

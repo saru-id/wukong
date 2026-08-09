@@ -42,8 +42,10 @@ impl Db {
                 detail  TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS tracked (
-                path      TEXT PRIMARY KEY,
-                added_ts  TEXT NOT NULL
+                path         TEXT PRIMARY KEY,
+                added_ts     TEXT NOT NULL,
+                sealed       INTEGER NOT NULL DEFAULT 0,
+                content_hash TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS inbox (
                 id          INTEGER PRIMARY KEY,
@@ -130,12 +132,42 @@ impl Db {
 
     // ---- Tracked files -------------------------------------------------
 
-    pub fn track(&self, path: &str) -> Result<bool, DbError> {
+    pub fn track(&self, path: &str, sealed: bool) -> Result<bool, DbError> {
         let inserted = self.conn.execute(
-            "INSERT OR IGNORE INTO tracked (path, added_ts) VALUES (?1, ?2)",
-            params![path, now()],
+            "INSERT OR IGNORE INTO tracked (path, added_ts, sealed) VALUES (?1, ?2, ?3)",
+            params![path, now(), i64::from(sealed)],
         )?;
+        if inserted == 0 && sealed {
+            // Tracking an already-tracked file as sealed upgrades it.
+            self.set_sealed(path, true)?;
+        }
         Ok(inserted > 0)
+    }
+
+    pub fn set_sealed(&self, path: &str, sealed: bool) -> Result<(), DbError> {
+        self.conn.execute(
+            "UPDATE tracked SET sealed = ?2 WHERE path = ?1",
+            params![path, i64::from(sealed)],
+        )?;
+        Ok(())
+    }
+
+    /// Plaintext content hash for a sealed file — the determinism
+    /// guard (age ciphertext differs every encryption).
+    pub fn set_content_hash(&self, path: &str, hash: &str) -> Result<(), DbError> {
+        self.conn.execute(
+            "UPDATE tracked SET content_hash = ?2 WHERE path = ?1",
+            params![path, hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn content_hash(&self, path: &str) -> Result<Option<String>, DbError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT content_hash FROM tracked WHERE path = ?1")?;
+        let mut rows = stmt.query_map(params![path], |row| row.get(0))?;
+        Ok(rows.next().transpose()?)
     }
 
     pub fn untrack(&self, path: &str) -> Result<bool, DbError> {
@@ -145,11 +177,12 @@ impl Db {
             > 0)
     }
 
-    pub fn tracked(&self) -> Result<Vec<String>, DbError> {
+    /// Every tracked file as (store-relative path, sealed).
+    pub fn tracked(&self) -> Result<Vec<(String, bool)>, DbError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT path FROM tracked ORDER BY path")?;
-        let rows = stmt.query_map([], |row| row.get(0))?;
+            .prepare("SELECT path, sealed FROM tracked ORDER BY path")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -356,9 +389,17 @@ mod tests {
     #[test]
     fn tracked_roster_round_trips() {
         let db = db();
-        assert!(db.track(".zshrc").unwrap());
-        assert!(!db.track(".zshrc").unwrap()); // idempotent
-        assert_eq!(db.tracked().unwrap(), vec![".zshrc".to_string()]);
+        assert!(db.track(".zshrc", false).unwrap());
+        assert!(!db.track(".zshrc", false).unwrap()); // idempotent
+        assert_eq!(db.tracked().unwrap(), vec![(".zshrc".to_string(), false)]);
+        // Re-tracking sealed upgrades in place.
+        db.track(".zshrc", true).unwrap();
+        assert_eq!(db.tracked().unwrap(), vec![(".zshrc".to_string(), true)]);
+        db.set_content_hash(".zshrc", "abc123").unwrap();
+        assert_eq!(
+            db.content_hash(".zshrc").unwrap().as_deref(),
+            Some("abc123")
+        );
         assert!(db.untrack(".zshrc").unwrap());
         assert!(db.tracked().unwrap().is_empty());
     }

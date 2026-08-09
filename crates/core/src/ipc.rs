@@ -32,6 +32,10 @@ pub enum Request {
     Status,
     Track {
         path: String,
+        /// Store only age ciphertext for this file (and permit
+        /// tracking forbidden-named files, since plaintext never
+        /// reaches git).
+        sealed: bool,
     },
     Untrack {
         path: String,
@@ -84,6 +88,15 @@ pub enum Request {
     },
     /// Live file vs stored copy, as a unified diff.
     Diff {
+        path: String,
+    },
+    /// Convert a tracked file to the sealed lane.
+    Seal {
+        path: String,
+    },
+    /// Return a sealed file to the plaintext lane — back through the
+    /// gate, which may quarantine it.
+    Unseal {
         path: String,
     },
     /// Governed settings with desired vs live values.
@@ -201,4 +214,6 @@ pub struct TrackedFile {
     /// Pretty live-path form ("~/.zshrc").
     pub display: String,
     pub exists: bool,
+    /// Stored as age ciphertext only.
+    pub sealed: bool,
 }
