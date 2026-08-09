@@ -271,21 +271,12 @@ pub fn scan_bytes(path: &Path, bytes: &[u8]) -> Scanned {
     }
 }
 
-/// Scan string content (the str-level entry point; `scan_bytes` is the
-/// byte-level one the engine uses).
+/// Scan string content — a thin wrapper over `scan_bytes` so the str
+/// and byte entry points can never drift apart. A security gate with
+/// two scanning code paths is a security gate with two sets of bugs.
 #[must_use]
 pub fn scan(path: &Path, content: &str) -> GateVerdict {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    if let Some(why) = forbidden(path, &name) {
-        return GateVerdict::Forbidden(why);
-    }
-    if content.bytes().take(8192).any(|b| b == 0) {
-        return scan_text(content, false);
-    }
-    scan_text(content, true)
+    scan_bytes(path, content.as_bytes()).verdict
 }
 
 fn scan_text(content: &str, with_entropy: bool) -> GateVerdict {
@@ -556,13 +547,10 @@ pub fn mask_findings(
     for (ix, (line, ending)) in split_lines(content).enumerate() {
         match by_line.get(&(ix + 1)) {
             Some(targets) => {
-                let mut sorted: Vec<&&Finding> = targets.iter().collect();
-                sorted.sort_by_key(|f| std::cmp::Reverse(f.start));
-                let mut masked = line.to_string();
-                for f in sorted {
-                    masked = mask(&masked, f.start, f.end);
-                }
-                out.push_str(&masked);
+                let mut spans: Vec<(&'static str, usize, usize)> =
+                    targets.iter().map(|f| (f.rule, f.start, f.end)).collect();
+                spans.sort_by_key(|&(_, start, _)| start);
+                out.push_str(&mask_spans(line, &spans));
             }
             None => out.push_str(line),
         }

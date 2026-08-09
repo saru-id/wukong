@@ -144,14 +144,6 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    pub fn is_tracked(&self, path: &str) -> Result<bool, DbError> {
-        Ok(self.conn.query_row(
-            "SELECT COUNT(*) FROM tracked WHERE path = ?1",
-            params![path],
-            |row| row.get::<_, i64>(0),
-        )? > 0)
-    }
-
     // ---- Allowances ----------------------------------------------------
 
     /// Record a sticky resolution for one finding: `approve` (the
@@ -329,9 +321,9 @@ mod tests {
         let db = db();
         assert!(db.track(".zshrc").unwrap());
         assert!(!db.track(".zshrc").unwrap()); // idempotent
-        assert!(db.is_tracked(".zshrc").unwrap());
+        assert_eq!(db.tracked().unwrap(), vec![".zshrc".to_string()]);
         assert!(db.untrack(".zshrc").unwrap());
-        assert!(!db.is_tracked(".zshrc").unwrap());
+        assert!(db.tracked().unwrap().is_empty());
     }
 
     #[test]

@@ -152,6 +152,26 @@ pub fn from_store_rel(rel: &Path) -> PathBuf {
     }
 }
 
+/// Would tracking this live path corrupt the store's namespaces?
+/// `.git` components would nest repos inside the mirror. A literal
+/// `~/__abs__/…` or `~/__wukong__/…` would collide with the store's
+/// reserved prefixes and break the `store_rel` round-trip. Files
+/// OUTSIDE home are never a collision: their `__abs__/` prefix IS the
+/// encoding, and it round-trips (`/__abs__/x` → `__abs__/__abs__/x` →
+/// `/__abs__/x`).
+#[must_use]
+pub fn is_reserved(live: &Path) -> bool {
+    let rel = store_rel(live);
+    if rel.components().any(|c| c.as_os_str() == ".git") {
+        return true;
+    }
+    live.starts_with(home())
+        && matches!(
+            rel.components().next(),
+            Some(c) if c.as_os_str() == "__abs__" || c.as_os_str() == "__wukong__"
+        )
+}
+
 /// Pretty form for display: `~/…` when under home.
 #[must_use]
 pub fn display(path: &Path) -> String {
@@ -173,5 +193,21 @@ mod tests {
         let etc = Path::new("/etc/paths.d/dev");
         assert_eq!(from_store_rel(&store_rel(etc)), etc);
         assert!(store_rel(etc).starts_with("__abs__"));
+    }
+
+    #[test]
+    fn reserved_paths_are_exactly_the_collisions() {
+        // Literal namespace dirs under home: reserved.
+        assert!(is_reserved(&home().join("__abs__/trap")));
+        assert!(is_reserved(&home().join("__wukong__/trap")));
+        // Anything inside a .git: reserved.
+        assert!(is_reserved(&home().join("dev/repo/.git/config")));
+        // A literal /__abs__ OUTSIDE home round-trips fine — allowed.
+        let outside = Path::new("/__abs__/odd");
+        assert!(!is_reserved(outside));
+        assert_eq!(from_store_rel(&store_rel(outside)), outside);
+        // And the ordinary cases are ordinary.
+        assert!(!is_reserved(&home().join(".zshrc")));
+        assert!(!is_reserved(Path::new("/etc/paths.d/dev")));
     }
 }

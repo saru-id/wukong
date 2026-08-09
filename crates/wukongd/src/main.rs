@@ -101,20 +101,7 @@ async fn main() -> anyhow::Result<()> {
 
     serve_socket(&socket, tx.clone())?;
 
-    // Signals are just another message; the loop exits and cleans up.
-    {
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            let mut term =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("signal handler installs");
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = term.recv() => {}
-            }
-            let _ = tx.send(Msg::Shutdown);
-        });
-    }
+    spawn_signal_handler(tx.clone());
 
     let notify_on = engine.config.notifications;
 
@@ -138,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
             }
             Msg::PushTick => {
                 if engine.wants_push() {
-                    start_push(&mut engine, tx.clone(), None);
+                    start_push(&mut engine, tx.clone());
                 }
             }
             Msg::PushDone(result) => {
@@ -157,12 +144,21 @@ async fn main() -> anyhow::Result<()> {
             }
             Msg::Client { req, reply } => {
                 match req {
-                    Request::PushNow if engine.push_in_flight() => {
-                        // Join the in-flight push; answer with its
-                        // actual outcome.
+                    // Every push reply — initiator or joiner — flows
+                    // through push_waiters and is answered by PushDone
+                    // with the push's actual outcome. One path.
+                    Request::PushNow if engine.remote_configured() => {
                         push_waiters.push(reply);
+                        if !engine.push_in_flight() {
+                            start_push(&mut engine, tx.clone());
+                        }
                     }
-                    Request::PushNow => handle_push_now(&mut engine, tx.clone(), reply),
+                    Request::PushNow => {
+                        let _ = reply.send(Response::Error {
+                            message: "no remote configured — set one in config.toml and restart"
+                                .to_string(),
+                        });
+                    }
                     req => {
                         let _ = reply.send(engine.handle(req));
                     }
@@ -185,43 +181,27 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Run the push on the blocking pool; completion returns to the loop
-/// as a message, and the optional client reply is answered truthfully
-/// from the actual result.
-fn start_push(
-    engine: &mut Engine,
-    tx: mpsc::UnboundedSender<Msg>,
-    reply: Option<tokio::sync::oneshot::Sender<Response>>,
-) {
+/// as `PushDone`, which answers every waiting client from the actual
+/// result.
+fn start_push(engine: &mut Engine, tx: mpsc::UnboundedSender<Msg>) {
     let store = engine.begin_push();
     tokio::task::spawn_blocking(move || {
         let result = store.push().map_err(|e| e.to_string());
-        if let Some(reply) = reply {
-            let response = match &result {
-                Ok(()) => Response::Ok {
-                    message: "pushed".to_string(),
-                },
-                Err(e) => Response::Error {
-                    message: format!("push failed: {e}"),
-                },
-            };
-            let _ = reply.send(response);
-        }
         let _ = tx.send(Msg::PushDone(result));
     });
 }
 
-fn handle_push_now(
-    engine: &mut Engine,
-    tx: mpsc::UnboundedSender<Msg>,
-    reply: tokio::sync::oneshot::Sender<Response>,
-) {
-    if engine.remote_configured() {
-        start_push(engine, tx, Some(reply));
-    } else {
-        let _ = reply.send(Response::Error {
-            message: "no remote configured — set one in config.toml and restart".to_string(),
-        });
-    }
+/// Signals are just another message; the loop exits and cleans up.
+fn spawn_signal_handler(tx: mpsc::UnboundedSender<Msg>) {
+    tokio::spawn(async move {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("signal handler installs");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+        let _ = tx.send(Msg::Shutdown);
+    });
 }
 
 /// Forward watcher signals into the engine loop's mailbox.

@@ -611,17 +611,7 @@ impl Engine {
                 message: "refused: that lives inside wukong's own data directory".to_string(),
             };
         }
-        // A file under any .git would land inside the store's own .git
-        // (or a nested repo); the watcher filters these anyway, so the
-        // track would be dead on arrival at best and repo-corrupting at
-        // worst. The reserved store namespaces are equally off-limits.
-        let rel_probe = paths::store_rel(&live);
-        if rel_probe.components().any(|c| c.as_os_str() == ".git")
-            || rel_probe.starts_with("__abs__/__abs__")
-            || rel_probe.starts_with("__wukong__")
-            || (live.starts_with(paths::home())
-                && (rel_probe.starts_with("__abs__") || rel_probe.starts_with("__wukong__")))
-        {
+        if paths::is_reserved(&live) {
             return Response::Error {
                 message: format!("refused: {} is a reserved path", paths::display(&live)),
             };
