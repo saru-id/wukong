@@ -50,6 +50,12 @@ much later phase.
   Event/inbox kinds are real enums (`EventKind`, `InboxKind`); strings
   exist only at the database boundary.
 - Conventional Commits. Leave work uncommitted unless asked.
+- **Help is part of the feature.** Every verb carries an `about` and a
+  `long_about` that states its exact semantics (what approve/ignore
+  MEAN, what is permanent, what is never touched); man pages and
+  completions are generated from the same clap definitions (hidden
+  gen-man / gen-completions commands), so the CLI is the single source
+  of documentation truth.
 - Never use npm/yarn; there is no JS here.
 
 ## Hard-won gotchas

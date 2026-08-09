@@ -21,8 +21,10 @@ jobs:
       - name: Package
         run: |
           STAGE="wukong-${{ github.event.release.tag_name }}-aarch64-apple-darwin"
-          mkdir "$STAGE"
+          mkdir -p "$STAGE/share/man/man1" "$STAGE/share/zsh/site-functions"
           cp target/release/wukong target/release/wukongd "$STAGE/"
+          ./target/release/wukong gen-man "$STAGE/share/man/man1"
+          ./target/release/wukong gen-completions zsh > "$STAGE/share/zsh/site-functions/_wukong"
           tar czf "$STAGE.tar.gz" "$STAGE"
           shasum -a 256 "$STAGE.tar.gz" > "$STAGE.tar.gz.sha256"
       - name: Attach to release

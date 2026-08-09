@@ -18,7 +18,26 @@ use wukong_core::ipc::{Request, Response};
 #[command(
     name = "wukong",
     version,
-    about = "Your system's governor: dotfiles, packages, and settings, watched and remembered."
+    about = "Your Mac's governor: dotfiles and packages, watched and remembered",
+    long_about = "wukong watches the parts of your Mac you care about and remembers \
+them, so you never have to.\n\n\
+Tracked dotfiles commit automatically to a private mirror repository the \
+moment they stop changing — every commit passes a mandatory secret gate \
+first, and anything suspicious is held in a review inbox instead of \
+reaching git. Homebrew installs are recorded in a manifest that syncs \
+with the same repository; installs made behind wukong's back are offered \
+for adoption. Running `wukong` with no command opens the dashboard.\n\n\
+State lives under XDG paths: config in ~/.config/wukong, the mirror \
+repository and database in ~/.local/share/wukong, the daemon socket and \
+log in ~/.local/state/wukong. The daemon runs as a launchd agent and is \
+managed with `wukong daemon`.",
+    after_help = "Run 'wukong <command> --help' for details on any command.",
+    after_long_help = "EXAMPLES:\n  \
+wukong init                      set this machine up\n  \
+wukong adopt-dotfiles            find and track the usual dotfiles\n  \
+wukong install jq                brew install, remembered\n  \
+wukong                           open the dashboard\n  \
+wukong status                    one-screen health summary"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -27,109 +46,313 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Set up wukong on this machine (config, store, launchd agent).
+    /// Set up wukong on this machine
+    #[command(
+        long_about = "Set up wukong on this machine: detect the machine name, write the \
+starter config, create the mirror store repository (cloning your remote \
+if one exists — the new-machine bootstrap), install the launchd agent, \
+and start the daemon. Idempotent: run it again any time to repair a \
+half-configured machine."
+    )]
+    #[command(after_long_help = "EXAMPLES:\n  \
+wukong init                      fresh machine, prompts for the remote\n  \
+wukong restore                   then bring a cloned store's files live")]
     Init,
-    /// Install via brew and remember it in the manifest.
+
+    /// Install via Homebrew and remember it in the manifest
+    #[command(
+        long_about = "Run `brew install` (its output streams through untouched) and record \
+the package in the manifest, which commits and syncs like every \
+dotfile. If the daemon is down the install still works — the package \
+is offered for adoption when it returns."
+    )]
+    #[command(after_long_help = "EXAMPLES:\n  \
+wukong install jq                a formula\n  \
+wukong install --cask raycast    a GUI app\n  \
+wukong install --no-track foo    install without remembering")]
     Install {
+        /// Package name, exactly as brew knows it
+        #[arg(value_name = "PACKAGE")]
         name: String,
-        /// Install as a cask (GUI app).
+        /// Install as a cask (GUI application)
         #[arg(long)]
         cask: bool,
-        /// Install without recording ("don't track this one").
+        /// Install without recording it ("don't track this one")
         #[arg(long)]
         no_track: bool,
     },
-    /// Uninstall via brew and drop it from the manifest.
+
+    /// Uninstall via Homebrew and drop it from the manifest
+    #[command(
+        long_about = "Run `brew uninstall` and remove the package from the manifest. Any \
+pending inbox offer for the package resolves itself."
+    )]
     Rm {
+        /// Package name, exactly as brew knows it
+        #[arg(value_name = "PACKAGE")]
         name: String,
+        /// The package is a cask (GUI application)
         #[arg(long)]
         cask: bool,
     },
-    /// Package manifest: list, sync, adopt, ignore.
+
+    /// Package manifest: list, sync, adopt, ignore
+    #[command(subcommand_value_name = "ACTION")]
     Pkg {
         #[command(subcommand)]
         action: PkgAction,
     },
-    /// Start tracking files — their changes commit automatically.
+
+    /// Start tracking files — their changes commit automatically
+    #[command(
+        long_about = "Start tracking one or more files. Each file is mirrored and committed \
+immediately, then every future change commits on its own once the file \
+stops changing. Every commit passes the secret gate: a detected \
+credential holds the file in the inbox instead of reaching git. Files \
+whose NAME is credential-bearing (.env, private keys, .netrc…) are \
+refused outright."
+    )]
+    #[command(after_long_help = "EXAMPLES:\n  \
+wukong track ~/.zshrc\n  \
+wukong track ~/.zshrc ~/.gitconfig ~/.config/starship.toml")]
     Track {
-        #[arg(required = true)]
+        /// One or more files to govern
+        #[arg(required = true, value_name = "PATH")]
         paths: Vec<String>,
     },
-    /// Find this machine's well-known dotfiles and track them all.
+
+    /// Find this machine's well-known dotfiles and track them all
+    #[command(
+        long_about = "Scan a curated list of well-known single-file configs — shell startup \
+files, git config, editor and terminal configs, tool settings — track \
+everything that exists and isn't already tracked, after one \
+confirmation. Each file still passes the secret gate individually: a \
+token in your real .zshrc quarantines that one file without blocking \
+the rest. Credential files are never on the candidate list."
+    )]
     AdoptDotfiles {
-        /// Skip the confirmation prompt.
+        /// Skip the confirmation prompt
         #[arg(long)]
         yes: bool,
     },
-    /// Stop offering anything under a path (sentinel noise valve).
-    Exclude { path: String },
-    /// Show what changed: live file vs the stored copy.
-    Diff { path: String },
-    /// The store's commit history for a tracked file.
-    Log {
+
+    /// Stop offering anything under a path (the noise valve)
+    #[command(
+        long_about = "Stop offering anything under a path, now and permanently: applied \
+immediately, persisted to config, and every open inbox offer under the \
+path is resolved away. Use it when an app churns its config and floods \
+the inbox — or press 'x' on the offer in the dashboard, which excludes \
+the offending file's directory. Tracked files are never affected: \
+tracking always outranks excluding."
+    )]
+    #[command(after_long_help = "EXAMPLES:\n  \
+wukong exclude ~/.config/noisyapp")]
+    Exclude {
+        /// Directory (or file) to stop watching
+        #[arg(value_name = "PATH")]
         path: String,
-        /// How many commits to show.
-        #[arg(short = 'n', long, default_value_t = 20)]
+    },
+
+    /// Show what changed: live file vs the stored copy
+    #[command(
+        long_about = "Unified diff between the live file and its stored mirror copy — what \
+would be committed at the next settle. Output is raw (this is you, \
+reading your own file at your own terminal); empty means live and \
+store agree."
+    )]
+    Diff {
+        /// A tracked file
+        #[arg(value_name = "PATH")]
+        path: String,
+    },
+
+    /// Show the store's commit history for a tracked file
+    Log {
+        /// A tracked file
+        #[arg(value_name = "PATH")]
+        path: String,
+        /// How many commits to show
+        #[arg(short = 'n', long, default_value_t = 20, value_name = "COUNT")]
         limit: usize,
     },
-    /// Stop tracking a file.
-    Untrack { path: String },
-    /// Show what wukong is watching and where it stands.
-    Status,
-    /// List tracked files.
-    Files,
-    /// Show the review inbox.
-    Inbox,
-    /// Resolve an inbox item: approve, redact, or ignore.
-    Resolve {
-        id: i64,
-        #[arg(value_parser = parse_resolution)]
-        resolution: Resolution,
+
+    /// Stop tracking a file
+    #[command(
+        long_about = "Stop tracking a file: it is removed from the mirror (as a commit, so \
+history is preserved) and its changes are no longer watched. The live \
+file is untouched."
+    )]
+    Untrack {
+        /// The tracked file to release
+        #[arg(value_name = "PATH")]
+        path: String,
     },
-    /// Push the store now.
+
+    /// One-screen health summary
+    #[command(
+        long_about = "One screen answering the questions that matter: which machine, which \
+remote, how many files tracked, how many inbox items wait, how many \
+commits are unpushed, and how long ago the last push landed."
+    )]
+    Status,
+
+    /// List tracked files
+    #[command(
+        long_about = "List every tracked file. A leading '!' marks a file that is in the \
+store but missing on disk (deleted, or not yet restored)."
+    )]
+    Files,
+
+    /// Show the review inbox
+    #[command(
+        long_about = "List open inbox items: quarantined secrets, sentinel files offered \
+for tracking, and packages offered for adoption or removal. Resolve \
+them with `wukong resolve` or from the dashboard."
+    )]
+    Inbox,
+
+    /// Resolve an inbox item
+    #[command(
+        long_about = "Resolve one inbox item by id. What each resolution means depends on \
+the item:\n\n\
+Quarantined secret — approve commits the secret and remembers the \
+decision (this exact token never asks again; a rotated token does). \
+redact commits with the secret masked in the stored copy, forever; the \
+live file is never touched. ignore sets the item aside until the file \
+changes again.\n\n\
+Sentinel offer — approve starts tracking the file. ignore sets it \
+aside; it may return when the file next changes.\n\n\
+Package offer — approve adopts it into the manifest. ignore is the \
+PERMANENT opt-out: the package is never offered again."
+    )]
+    #[command(after_long_help = "EXAMPLES:\n  \
+wukong inbox                     find the item id\n  \
+wukong resolve 3 approve\n  \
+wukong resolve 3 redact          commit, but mask the secret")]
+    Resolve {
+        /// Item id, as shown by `wukong inbox`
+        #[arg(value_name = "ID")]
+        id: i64,
+        #[arg(value_enum, value_name = "RESOLUTION")]
+        resolution: ResolutionArg,
+    },
+
+    /// Push the store to its remote now
+    #[command(
+        long_about = "Push the mirror repository to its remote now, rather than waiting for \
+the push timer. Reports the push's real outcome; a second push while \
+one is running joins it and shares its result."
+    )]
     Push,
-    /// Copy stored files back to their live locations (new-machine
-    /// bootstrap). No path restores everything.
+
+    /// Copy stored files back to their live locations
+    #[command(
+        long_about = "Copy stored files back to their live locations and track them — the \
+new-machine bootstrap after `wukong init` cloned an existing store. \
+Restored files come back owner-only (0600). Existing live files that \
+differ are skipped unless --force is given."
+    )]
+    #[command(after_long_help = "EXAMPLES:\n  \
+wukong restore                   everything in the store\n  \
+wukong restore ~/.zshrc          one file\n  \
+wukong restore --force           overwrite files that differ")]
     Restore {
+        /// One file to restore (default: everything in the store)
+        #[arg(value_name = "PATH")]
         path: Option<String>,
-        /// Overwrite live files that differ from the stored copy.
+        /// Overwrite live files that differ from the stored copy
         #[arg(long)]
         force: bool,
     },
-    /// Manage the background daemon.
+
+    /// Manage the background daemon
+    #[command(subcommand_value_name = "ACTION")]
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
     },
-    /// Check the health of the whole setup.
+
+    /// Check the health of the whole setup
+    #[command(
+        long_about = "Check the whole setup: config parses, store exists, remote configured \
+and REACHABLE, daemon running, launchd agent installed — plus the \
+tracked/inbox/unpushed counts and the last push age."
+    )]
     Doctor,
+
+    /// Generate man pages into a directory
+    #[command(hide = true)]
+    GenMan {
+        #[arg(value_name = "DIR")]
+        dir: std::path::PathBuf,
+    },
+
+    /// Generate a shell completion script on stdout
+    #[command(hide = true)]
+    GenCompletions {
+        #[arg(value_enum, value_name = "SHELL")]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum PkgAction {
-    /// Manifest entries and whether each is actually installed.
+    /// Manifest entries and whether each is actually installed
+    #[command(
+        long_about = "Every manifest entry with its live state. A leading '!' marks a \
+package that is in the manifest but not installed — `wukong pkg sync` \
+installs those."
+    )]
     List,
-    /// Install everything in the manifest that's missing.
+
+    /// Install everything in the manifest that's missing
+    #[command(
+        long_about = "Install every manifest package that is missing on this machine, via \
+brew, after showing the plan and confirming. Apps wukong can only \
+remember (drag-installed) are printed as a checklist."
+    )]
     Sync {
-        /// Skip the confirmation prompt.
+        /// Skip the confirmation prompt
         #[arg(long)]
         yes: bool,
     },
-    /// Bulk-adopt everything brew currently has on request.
+
+    /// Bulk-adopt everything brew has installed on request
+    #[command(
+        long_about = "Day-one onboarding: put every formula and cask that brew installed on \
+request (dependencies never count) straight into the manifest, in one \
+commit. Apps stay offer-driven — a used Mac's /Applications is too \
+noisy to adopt wholesale."
+    )]
     AdoptInstalled,
-    /// Never offer this package again.
+
+    /// Never offer this package again
+    #[command(
+        long_about = "The permanent per-package opt-out: recorded in the manifest's ignore \
+list (so it syncs), honored across reinstalls. Undo with \
+`wukong pkg unignore`."
+    )]
     Ignore {
+        /// Package or app name
+        #[arg(value_name = "NAME")]
         name: String,
+        /// It's a cask
         #[arg(long)]
         cask: bool,
+        /// It's a /Applications app
         #[arg(long)]
         app: bool,
     },
-    /// Allow a previously ignored package to be offered again.
+
+    /// Allow a previously ignored package to be offered again
     Unignore {
+        /// Package or app name
+        #[arg(value_name = "NAME")]
         name: String,
+        /// It's a cask
         #[arg(long)]
         cask: bool,
+        /// It's a /Applications app
         #[arg(long)]
         app: bool,
     },
@@ -137,14 +360,36 @@ pub enum PkgAction {
 
 #[derive(Subcommand, Clone, Copy)]
 pub enum DaemonAction {
+    /// Start the daemon (installing the launchd agent if needed)
     Start,
+    /// Stop the daemon and unload the launchd agent
     Stop,
+    /// Restart the daemon (required after editing config.toml)
     Restart,
+    /// Is the daemon running?
     Status,
 }
 
-fn parse_resolution(s: &str) -> Result<Resolution, String> {
-    Resolution::parse(s).ok_or_else(|| "expected approve, redact, or ignore".to_string())
+/// The resolution verbs, with their meaning spelled out where clap
+/// shows possible values. Converted to the core type at the boundary.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ResolutionArg {
+    /// Accept: commit the secret / track the file / adopt the package
+    Approve,
+    /// Commit with the secret masked in the stored copy, forever
+    Redact,
+    /// Set aside (for package offers: permanently)
+    Ignore,
+}
+
+impl From<ResolutionArg> for Resolution {
+    fn from(arg: ResolutionArg) -> Self {
+        match arg {
+            ResolutionArg::Approve => Resolution::Approve,
+            ResolutionArg::Redact => Resolution::Redact,
+            ResolutionArg::Ignore => Resolution::Ignore,
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -179,7 +424,10 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Status) => status(),
         Some(Command::Files) => files(),
         Some(Command::Inbox) => inbox(),
-        Some(Command::Resolve { id, resolution }) => say(Request::InboxResolve { id, resolution }),
+        Some(Command::Resolve { id, resolution }) => say(Request::InboxResolve {
+            id,
+            resolution: resolution.into(),
+        }),
         Some(Command::Push) => say(Request::PushNow),
         Some(Command::Restore { path, force }) => say(Request::Restore { path, force }),
         Some(Command::Daemon { action }) => launchd::run(action),
@@ -187,7 +435,38 @@ fn main() -> anyhow::Result<()> {
             doctor();
             Ok(())
         }
+        Some(Command::GenMan { dir }) => gen_man(&dir),
+        Some(Command::GenCompletions { shell }) => {
+            use clap::CommandFactory as _;
+            clap_complete::generate(shell, &mut Cli::command(), "wukong", &mut std::io::stdout());
+            Ok(())
+        }
     }
+}
+
+/// Render roff man pages: wukong.1 plus one page per visible
+/// subcommand (wukong-track.1, wukong-pkg-sync.1, …).
+fn gen_man(dir: &std::path::Path) -> anyhow::Result<()> {
+    use clap::CommandFactory as _;
+    std::fs::create_dir_all(dir)?;
+    let mut root = Cli::command();
+    root.build();
+    render_man(&root, "wukong", dir)?;
+    println!("man pages written to {}", dir.display());
+    Ok(())
+}
+
+fn render_man(cmd: &clap::Command, name: &str, dir: &std::path::Path) -> anyhow::Result<()> {
+    let mut buf = Vec::new();
+    clap_mangen::Man::new(cmd.clone()).render(&mut buf)?;
+    std::fs::write(dir.join(format!("{name}.1")), buf)?;
+    for sub in cmd.get_subcommands() {
+        if sub.is_hide_set() || sub.get_name() == "help" {
+            continue;
+        }
+        render_man(sub, &format!("{name}-{}", sub.get_name()), dir)?;
+    }
+    Ok(())
 }
 
 /// Fire a request whose success is just a message.

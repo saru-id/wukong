@@ -106,4 +106,6 @@ make drill   # live drills: the real daemon in a sandbox
 
 CI runs the same on every push — plus the RustSec advisory scan
 (weekly too), the property tests, and both live drills. Releases get
-an arm64 binary tarball attached automatically on publish.
+an arm64 tarball attached automatically on publish, complete with man
+pages (`man wukong`, `man wukong-resolve`, …) and zsh completions;
+`wukong <command> --help` explains every verb's exact semantics.

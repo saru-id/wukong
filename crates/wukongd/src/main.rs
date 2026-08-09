@@ -75,8 +75,43 @@ fn load_config_or_exit() -> Config {
     }
 }
 
+const DAEMON_HELP: &str = "\
+wukongd — the wukong governor daemon
+
+Watches tracked dotfiles, sentinel paths, and Homebrew; commits
+through the secret gate; answers the wukong CLI over a unix socket.
+
+Takes no arguments. It runs as a launchd agent — manage it with:
+    wukong daemon start|stop|restart|status
+
+Config:  ~/.config/wukong/config.toml (restart after editing)
+State:   ~/.local/share/wukong (store + database)
+Log:     ~/.local/state/wukong/wukongd.log";
+
+/// The daemon takes no arguments; answer the two universal flags and
+/// refuse anything else. Runs before the tokio runtime spins up.
+fn handle_args() {
+    if let Some(arg) = std::env::args().nth(1) {
+        match arg.as_str() {
+            "--version" | "-V" => {
+                println!("wukongd {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            "--help" | "-h" => {
+                println!("{DAEMON_HELP}");
+                std::process::exit(0);
+            }
+            other => {
+                eprintln!("wukongd: unexpected argument '{other}' — see --help");
+                std::process::exit(2);
+            }
+        }
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    handle_args();
     let config = load_config_or_exit();
     cap_log_size();
 

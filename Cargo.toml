@@ -13,7 +13,9 @@ license = "MIT"
 wukong-core = { path = "crates/core" }
 
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "wrap_help"] }
+clap_complete = "4"
+clap_mangen = "0.2"
 notify = "8"
 ratatui = { version = "0.30", default-features = false, features = [
     "crossterm",
