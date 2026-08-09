@@ -75,6 +75,9 @@ pub struct Packages {
     pub brew_prefix: Option<PathBuf>,
     /// Override /Applications (tests).
     pub applications_dir: Option<PathBuf>,
+    /// Pin any provider's observation root to a path (also how
+    /// sandboxed runs point wukong at fake trees).
+    pub roots: std::collections::BTreeMap<String, PathBuf>,
 }
 
 impl Default for Packages {
@@ -83,6 +86,7 @@ impl Default for Packages {
             enabled: true,
             brew_prefix: None,
             applications_dir: None,
+            roots: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -209,10 +213,12 @@ impl Config {
 
     /// Detector roots honoring config overrides.
     #[must_use]
-    pub fn pkg_roots(&self) -> crate::pkg::PkgRoots {
-        crate::pkg::PkgRoots::detect(
+    pub fn pkg_roots(&self) -> crate::pkg::Roots {
+        crate::pkg::detect_roots(
             self.packages.brew_prefix.as_deref(),
             self.packages.applications_dir.as_deref(),
+            &self.packages.roots,
+            paths::home(),
         )
     }
 }

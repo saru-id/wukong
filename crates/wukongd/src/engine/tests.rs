@@ -21,11 +21,14 @@ fn rig() -> Rig {
     let root = tmp.path().canonicalize().unwrap();
     let home = root.join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let config = Config {
+    let mut config = Config {
         machine: "testbox".to_string(),
         debounce_secs: 0,
         ..Config::default()
     };
+    // Hermetic and fast: no provider detection (which would shell
+    // `npm root -g` and read the DEVELOPER's real package worlds).
+    config.packages.enabled = false;
     let engine = Engine::new(config, &root.join("wukong.db"), &root.join("store")).unwrap();
     Rig {
         engine,
@@ -178,6 +181,15 @@ fn pkg_rig() -> Rig {
     };
     config.packages.brew_prefix = Some(root.join("brew"));
     config.packages.applications_dir = Some(root.join("Applications"));
+    // Hermetic: point every other provider at a nonexistent path so
+    // the DEVELOPER's real npm/cargo/uv installs can never leak into
+    // the test's world.
+    for provider in ["npm", "pnpm", "bun", "cargo", "pipx", "uv"] {
+        config.packages.roots.insert(
+            provider.to_string(),
+            root.join(format!("absent-{provider}")),
+        );
+    }
     let engine = Engine::new(config, &root.join("wukong.db"), &root.join("store")).unwrap();
     Rig {
         engine,
@@ -342,12 +354,13 @@ fn missing_sentinel_promoted_to_dir_requests_recursive_watch() {
     let root = tmp.path().canonicalize().unwrap();
     std::fs::create_dir_all(root.join("home")).unwrap();
     let watched = root.join("home/appsupport");
-    let config = Config {
+    let mut config = Config {
         machine: "testbox".to_string(),
         debounce_secs: 0,
         sentinels: vec![watched.to_string_lossy().into_owned()],
         ..Config::default()
     };
+    config.packages.enabled = false;
     let mut engine = Engine::new(config, &root.join("wukong.db"), &root.join("store")).unwrap();
     assert!(engine.sentinel_files.contains(&watched));
 
@@ -447,12 +460,13 @@ fn exclude_silences_a_subtree_and_resolves_open_offers() {
     let home = root.join("home");
     let noisy = home.join("config-tree/noisyapp");
     std::fs::create_dir_all(&noisy).unwrap();
-    let config = Config {
+    let mut config = Config {
         machine: "testbox".to_string(),
         debounce_secs: 0,
         sentinels: vec![home.join("config-tree").to_string_lossy().into_owned()],
         ..Config::default()
     };
+    config.packages.enabled = false;
     let mut engine = Engine::new(config, &root.join("wukong.db"), &root.join("store")).unwrap();
 
     // An offer opens for a file under the noisy subtree.
@@ -544,6 +558,7 @@ fn settings_rig() -> (Rig, PathBuf) {
         debounce_secs: 0,
         ..Config::default()
     };
+    config.packages.enabled = false;
     config.settings.preferences_dir = Some(prefs.clone());
     let engine = Engine::new(config, &root.join("wukong.db"), &root.join("store")).unwrap();
     (
@@ -819,6 +834,7 @@ fn seal_rig() -> Rig {
         debounce_secs: 0,
         ..Config::default()
     };
+    config.packages.enabled = false;
     config.seal.identity_file = Some(root.join("age.key"));
     let engine = Engine::new(config, &root.join("wukong.db"), &root.join("store")).unwrap();
     Rig {
@@ -958,4 +974,50 @@ fn unseal_goes_back_through_the_gate() {
         wukong_core::seal::is_sealed(&stored),
         "store must still hold the last sealed blob, not plaintext"
     );
+}
+
+#[test]
+fn language_providers_offer_and_adopt() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    let npm = root.join("npmroot");
+    std::fs::create_dir_all(npm.join("typescript")).unwrap();
+    std::fs::create_dir_all(npm.join("@biomejs/biome")).unwrap();
+    std::fs::create_dir_all(npm.join(".bin")).unwrap();
+    let cargo = root.join("cargohome");
+    std::fs::create_dir_all(&cargo).unwrap();
+    std::fs::write(
+        cargo.join(".crates.toml"),
+        "[v1]\n\"ripgrep 14.1.0 (registry+https://github.com/rust-lang/crates.io-index)\" = [\"rg\"]\n",
+    )
+    .unwrap();
+
+    let mut config = Config {
+        machine: "testbox".to_string(),
+        debounce_secs: 0,
+        ..Config::default()
+    };
+    for provider in ["formula", "cask", "app", "pnpm", "bun", "pipx", "uv"] {
+        config.packages.roots.insert(
+            provider.to_string(),
+            root.join(format!("absent-{provider}")),
+        );
+    }
+    config.packages.roots.insert("npm".to_string(), npm.clone());
+    config.packages.roots.insert("cargo".to_string(), cargo);
+    let mut engine = Engine::new(config, &root.join("wukong.db"), &root.join("store")).unwrap();
+
+    engine.reconcile(); // baseline swallows the pre-existing world
+    std::fs::create_dir_all(npm.join("prettier")).unwrap();
+    assert_eq!(engine.reconcile(), 1);
+    let item = &engine.db.inbox_open().unwrap()[0];
+    assert_eq!(item.subject, "npm:prettier");
+    engine.resolve(item.id, Resolution::Approve);
+    assert!(engine.manifest.contains(Provider::Npm, "prettier"));
+    // Scoped names and cargo installs were baselined as full names.
+    let states = engine.db.pkg_state("npm").unwrap();
+    assert!(states.contains("@biomejs/biome"));
+    assert!(!states.contains(".bin"));
+    assert!(engine.db.pkg_state("cargo").unwrap().contains("ripgrep"));
 }

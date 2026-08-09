@@ -54,20 +54,27 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
   runs brew (its output streams through untouched) and records the
   package in a manifest that lives in the store — committed, pushed,
   and historied like every dotfile. `wukong rm` is the reverse.
-  `--no-track` opts a single install out.
-- **Nothing escapes notice.** The daemon watches the brew Cellar and
-  Caskroom and /Applications. Install something directly — `brew
-  install`, a downloaded .app — and it lands in the inbox as "adopt
-  it?". Approve to remember it; ignore to never be asked about that
-  package again. Dependencies never surface: detection reads brew's
-  own receipts and only what you asked for counts.
+  `--no-track` opts a single install out, and `--via` picks the
+  provider: brew formulae and casks, plus global npm, pnpm, bun,
+  cargo, pipx, and uv tools.
+- **Nothing escapes notice.** The daemon watches the brew Cellar,
+  Caskroom, /Applications, and every language provider's global root
+  (npm and pnpm asked once at startup, cargo's `.crates.toml`, bun,
+  pipx, and uv at their fixed homes). Install something directly —
+  `brew install`, `npm i -g`, a downloaded .app — and it lands in the
+  inbox as "adopt it?". Approve to remember it; ignore to never be
+  asked about that package again. Dependencies never surface:
+  detection reads each manager's own receipts and only what you asked
+  for counts.
 - **Symmetry on the way out.** Uninstall a manifest package behind
   wukong's back and the inbox asks whether to drop it or keep it for
   reinstall.
 - **The new-machine answer.** `wukong pkg sync` installs everything in
-  the manifest that's missing (and prints the checklist of apps it can
-  remember but not install). `wukong pkg adopt-installed` bulk-imports
-  an existing machine's brew world on day one.
+  the manifest that's missing, each package through its own manager —
+  it shows the exact commands first, and `--dry-run` stops there.
+  Apps it can remember but not install come back as a checklist.
+  `wukong pkg adopt-installed` bulk-imports an existing machine's
+  whole package world on day one.
 
 ### Settings
 
@@ -139,9 +146,9 @@ database in `~/.local/share/wukong`, the socket in `~/.local/state`.
 
 ## Roadmap
 
-- Settings governance: a curated corpus of macOS settings, governed
-  the same way files and packages are.
-- More package providers: mas, and npm/cargo/pipx globals.
+- Providers without stable on-disk receipts: mas (no receipt dir),
+  gem and go (version-mangled paths). Deliberately out until the
+  detection can be as boring as the rest.
 - The GUI, as a third client of the same daemon socket.
 
 ## Development

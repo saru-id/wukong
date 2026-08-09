@@ -36,7 +36,17 @@ notifications = false
 enabled = true
 brew_prefix = "$ROOT/brew"
 applications_dir = "$ROOT/Applications"
+
+[packages.roots]
+npm = "$ROOT/npmroot"
+cargo = "$ROOT/cargohome"
+pnpm = "$ROOT/absent-pnpm"
+bun = "$ROOT/absent-bun"
+pipx = "$ROOT/absent-pipx"
+uv = "$ROOT/absent-uv"
 EOF
+mkdir -p "$ROOT/npmroot/typescript" "$ROOT/npmroot/.bin" "$ROOT/cargohome"
+printf '[v1]\n"ripgrep 14.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = ["rg"]\n' > "$ROOT/cargohome/.crates.toml"
 
 DB="$XDG_DATA_HOME/wukong/wukong.db"
 STORE="$XDG_DATA_HOME/wukong/store"
@@ -88,11 +98,30 @@ ID=$(sqlite3 "$DB" "SELECT id FROM inbox WHERE resolved=0 LIMIT 1")
 "$W" resolve "$ID" approve > /dev/null
 check "manifest dropped ripgrep" "! grep -q ripgrep '$MANIFEST'"
 
+echo "=== language providers: watcher-driven adoption"
+mkdir -p "$ROOT/npmroot/@biomejs/biome"
+sleep 3
+check "scoped npm package offered" "sqlite3 '$DB' \"SELECT subject FROM inbox WHERE resolved=0\" | grep -q 'npm:@biomejs/biome'"
+ID=$(sqlite3 "$DB" "SELECT id FROM inbox WHERE resolved=0 AND subject LIKE 'npm:%' LIMIT 1")
+"$W" resolve "$ID" approve > /dev/null
+check "npm section lands in the manifest" "grep -q '@biomejs/biome' '$MANIFEST'"
+
+echo "=== pkg sync --dry-run speaks each provider's language"
+"$W" pkg adopt-installed > /dev/null
+rm -rf "$ROOT/npmroot/@biomejs/biome" "$ROOT/brew/Cellar/jq"
+sleep 3
+for GID in $(sqlite3 "$DB" "SELECT id FROM inbox WHERE resolved=0"); do "$W" resolve "$GID" ignore > /dev/null; done
+PLAN=$("$W" pkg sync --dry-run)
+check "dry-run plans npm install -g" "echo \"\$PLAN\" | grep -q 'npm install -g @biomejs/biome'"
+check "dry-run plans brew install" "echo \"\$PLAN\" | grep -q 'brew install jq'"
+check "dry-run executes nothing" "[ ! -d \"$ROOT/npmroot/@biomejs/biome\" ]"
+
 echo "=== pkg list + bulk adopt"
 "$W" pkg adopt-installed > /dev/null
 check "bulk adopt took baseline jq" "grep -q '\"jq\"' '$MANIFEST'"
 LIST=$("$W" pkg list)
-check "pkg list shows jq installed" "echo \"$LIST\" | grep -q '^  jq'"
+check "pkg list marks removed jq as missing" "echo \"$LIST\" | grep -q '^! jq'"
+check "pkg list shows the npm provider" "echo \"$LIST\" | grep -q npm"
 
 echo "=== dotfiles still governed (regression)"
 echo 'export A=1' > "$HOME/.zshrc"

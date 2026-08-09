@@ -16,7 +16,7 @@ use wukong_core::db::InboxOutcome;
 use wukong_core::events::{EventKind, InboxKind, Resolution};
 use wukong_core::gate::{self, Finding, GateVerdict};
 use wukong_core::ipc::{Request, Response, StatusInfo, TrackedFile};
-use wukong_core::pkg::{Manifest, PkgRoots, Provider};
+use wukong_core::pkg::{Manifest, Provider, Roots};
 use wukong_core::{Config, Db, Store, paths};
 
 /// Inbox bodies are evidence, not archives.
@@ -75,8 +75,8 @@ pub struct Engine {
     /// Package governance: the synced manifest, where the detectors
     /// look, and a debounce mark for the next reconcile.
     manifest: Manifest,
-    pkg_roots: PkgRoots,
-    pkg_watch: Vec<PathBuf>,
+    pkg_roots: Roots,
+    pkg_watch: Vec<(PathBuf, bool)>,
     pkg_dirty: Option<Instant>,
     /// The reconcile's snapshot of what's installed — `pkg_list` serves
     /// this instead of walking the Cellar per request.
@@ -145,16 +145,12 @@ impl Engine {
         let pkg_roots = if config.packages.enabled {
             config.pkg_roots()
         } else {
-            PkgRoots {
-                cellar: None,
-                caskroom: None,
-                applications: None,
-            }
+            Roots::default()
         };
-        let pkg_watch = pkg_roots
+        let pkg_watch: Vec<(PathBuf, bool)> = pkg_roots
             .watch_roots()
             .iter()
-            .map(|r| paths::canonicalize_lenient(r))
+            .map(|(r, recursive)| (paths::canonicalize_lenient(r), *recursive))
             .collect();
         let (settings_manifest, settings_poisoned) =
             match wukong_core::settings::SettingsManifest::load(store.dir()) {
@@ -239,8 +235,9 @@ impl Engine {
                 roots.entry(parent.to_path_buf()).or_insert(false);
             }
         }
-        for root in &self.pkg_watch {
-            roots.entry(root.clone()).or_insert(false);
+        for (root, recursive) in &self.pkg_watch {
+            let entry = roots.entry(root.clone()).or_insert(*recursive);
+            *entry = *entry || *recursive;
         }
         if let Some(prefs) = &self.prefs_dir {
             roots.entry(prefs.clone()).or_insert(false);
@@ -293,7 +290,7 @@ impl Engine {
         if self
             .pkg_watch
             .iter()
-            .any(|r| path.parent() == Some(r.as_path()) || path == *r)
+            .any(|(root, _)| path.starts_with(root))
         {
             self.pkg_dirty = Some(Instant::now());
             return;
@@ -319,7 +316,9 @@ impl Engine {
         for path in all {
             self.pending.insert(path, now);
         }
-        // Lost events may include package or settings transitions.
+        // Lost events may include package or settings transitions —
+        // and new providers may have appeared since startup.
+        self.redetect_roots();
         self.pkg_dirty = Some(now);
         self.settings_dirty = Some(now);
     }

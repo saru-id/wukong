@@ -22,6 +22,28 @@ const BASELINE_MARKER: &str = "__meta__";
 const UNSETTLED_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
 
 impl Engine {
+    /// Providers can appear after the daemon started (brew installed,
+    /// the first cargo install). Re-detection can fork (npm asks its
+    /// own binary for the global root), so it runs on the slow rescan
+    /// heartbeat and at startup — NEVER per reconcile.
+    pub fn redetect_roots(&mut self) {
+        if !self.config.packages.enabled {
+            return;
+        }
+        let fresh = self.config.pkg_roots();
+        if fresh.0.len() == self.pkg_roots.0.len() {
+            return;
+        }
+        for (root, recursive) in fresh.watch_roots() {
+            let canon = wukong_core::paths::canonicalize_lenient(&root);
+            if !self.pkg_watch.iter().any(|(r, _)| *r == canon) {
+                self.request_watch(&canon, recursive);
+                self.pkg_watch.push((canon, recursive));
+            }
+        }
+        self.pkg_roots = fresh;
+    }
+
     /// Compare reality against the last acknowledged state and offer
     /// only the TRANSITIONS: a newly appeared package that isn't in
     /// the manifest or on the ignore list becomes an adoption offer; a
@@ -33,18 +55,6 @@ impl Engine {
         self.pkg_dirty = None;
         if !self.config.packages.enabled {
             return 0;
-        }
-        // Homebrew can appear after the daemon started; pick it up.
-        if self.pkg_roots.cellar.is_none() || self.pkg_roots.caskroom.is_none() {
-            let fresh = self.config.pkg_roots();
-            for root in fresh.watch_roots() {
-                let canon = wukong_core::paths::canonicalize_lenient(&root);
-                if !self.pkg_watch.contains(&canon) {
-                    self.request_watch(&canon, false);
-                    self.pkg_watch.push(canon);
-                }
-            }
-            self.pkg_roots = fresh;
         }
         let current = self.pkg_roots.installed();
         self.pkg_installed.clone_from(&current);
@@ -59,12 +69,7 @@ impl Engine {
         // interesting event — the receipt — will land too deep for the
         // watch. Re-arm so the next ticks re-check, bounded so a
         // permanently receiptless dir cannot spin the reconcile.
-        if self
-            .pkg_roots
-            .cellar
-            .as_deref()
-            .is_some_and(pkg::unsettled_formulae)
-        {
+        if self.pkg_roots.cellar().is_some_and(pkg::unsettled_formulae) {
             let since = *self
                 .pkg_unsettled_since
                 .get_or_insert_with(std::time::Instant::now);

@@ -60,22 +60,29 @@ wukong init                      fresh machine, prompts for the remote\n  \
 wukong restore                   then bring a cloned store's files live")]
     Init,
 
-    /// Install via Homebrew and remember it in the manifest
+    /// Install a package and remember it in the manifest
     #[command(
-        long_about = "Run `brew install` (its output streams through untouched) and record \
-the package in the manifest, which commits and syncs like every \
-dotfile. If the daemon is down the install still works — the package \
-is offered for adoption when it returns."
+        long_about = "Run the provider's own installer (its output streams through \
+untouched) and record the package in the manifest, which commits and \
+syncs like every dotfile. Homebrew formulae by default; --via selects \
+any supported provider (cask, npm, pnpm, bun, cargo, pipx, uv). If \
+the daemon is down the install still works — the package is offered \
+for adoption when it returns."
     )]
     #[command(after_long_help = "EXAMPLES:\n  \
-wukong install jq                a formula\n  \
-wukong install --cask raycast    a GUI app\n  \
-wukong install --no-track foo    install without remembering")]
+wukong install jq                     a brew formula\n  \
+wukong install --cask raycast         a GUI app\n  \
+wukong install --via npm typescript   an npm global\n  \
+wukong install --via cargo ripgrep    a cargo binary\n  \
+wukong install --no-track foo         install without remembering")]
     Install {
-        /// Package name, exactly as brew knows it
+        /// Package name, exactly as the provider knows it
         #[arg(value_name = "PACKAGE")]
         name: String,
-        /// Install as a cask (GUI application)
+        /// Which provider installs it (default: brew formula)
+        #[arg(long, value_enum, conflicts_with = "cask")]
+        via: Option<pkg_cli::ViaArg>,
+        /// Shorthand for --via cask
         #[arg(long)]
         cask: bool,
         /// Install without recording it ("don't track this one")
@@ -83,16 +90,19 @@ wukong install --no-track foo    install without remembering")]
         no_track: bool,
     },
 
-    /// Uninstall via Homebrew and drop it from the manifest
+    /// Uninstall a package and drop it from the manifest
     #[command(
-        long_about = "Run `brew uninstall` and remove the package from the manifest. Any \
-pending inbox offer for the package resolves itself."
+        long_about = "Run the provider's own uninstaller and remove the package from the \
+manifest. Any pending inbox offer for the package resolves itself."
     )]
     Rm {
-        /// Package name, exactly as brew knows it
+        /// Package name, exactly as the provider knows it
         #[arg(value_name = "PACKAGE")]
         name: String,
-        /// The package is a cask (GUI application)
+        /// Which provider uninstalls it (default: brew formula)
+        #[arg(long, value_enum, conflicts_with = "cask")]
+        via: Option<pkg_cli::ViaArg>,
+        /// Shorthand for --via cask
         #[arg(long)]
         cask: bool,
     },
@@ -504,14 +514,18 @@ installs those."
 
     /// Install everything in the manifest that's missing
     #[command(
-        long_about = "Install every manifest package that is missing on this machine, via \
-brew, after showing the plan and confirming. Apps wukong can only \
-remember (drag-installed) are printed as a checklist."
+        long_about = "Install every missing manifest package via its own provider — brew, \
+npm, pnpm, bun, cargo, pipx, uv — after showing the exact commands and \
+confirming. Apps wukong can only remember (drag-installed) are printed \
+as a checklist."
     )]
     Sync {
         /// Skip the confirmation prompt
         #[arg(long)]
         yes: bool,
+        /// Show the plan without executing anything
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Bulk-adopt everything brew has installed on request
@@ -533,12 +547,9 @@ list (so it syncs), honored across reinstalls. Undo with \
         /// Package or app name
         #[arg(value_name = "NAME")]
         name: String,
-        /// It's a cask
-        #[arg(long)]
-        cask: bool,
-        /// It's a /Applications app
-        #[arg(long)]
-        app: bool,
+        /// Which provider it belongs to
+        #[arg(long, value_enum, default_value = "formula")]
+        via: PkgProviderArg,
     },
 
     /// Allow a previously ignored package to be offered again
@@ -546,13 +557,41 @@ list (so it syncs), honored across reinstalls. Undo with \
         /// Package or app name
         #[arg(value_name = "NAME")]
         name: String,
-        /// It's a cask
-        #[arg(long)]
-        cask: bool,
-        /// It's a /Applications app
-        #[arg(long)]
-        app: bool,
+        /// Which provider it belongs to
+        #[arg(long, value_enum, default_value = "formula")]
+        via: PkgProviderArg,
     },
+}
+
+/// Every provider including App — ignore/unignore applies to apps too.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum PkgProviderArg {
+    Formula,
+    Cask,
+    App,
+    Npm,
+    Pnpm,
+    Bun,
+    Cargo,
+    Pipx,
+    Uv,
+}
+
+impl From<PkgProviderArg> for wukong_core::pkg::Provider {
+    fn from(arg: PkgProviderArg) -> Self {
+        use wukong_core::pkg::Provider as P;
+        match arg {
+            PkgProviderArg::Formula => P::Formula,
+            PkgProviderArg::Cask => P::Cask,
+            PkgProviderArg::App => P::App,
+            PkgProviderArg::Npm => P::Npm,
+            PkgProviderArg::Pnpm => P::Pnpm,
+            PkgProviderArg::Bun => P::Bun,
+            PkgProviderArg::Cargo => P::Cargo,
+            PkgProviderArg::Pipx => P::Pipx,
+            PkgProviderArg::Uv => P::Uv,
+        }
+    }
 }
 
 #[derive(Subcommand, Clone, Copy)]
@@ -589,6 +628,15 @@ impl From<ResolutionArg> for Resolution {
             ResolutionArg::Ignore => Resolution::Ignore,
             ResolutionArg::Seal => Resolution::Seal,
         }
+    }
+}
+
+/// `--via`/`--cask` to a provider: cask sugar wins over the default.
+fn resolve_via(via: Option<pkg_cli::ViaArg>, cask: bool) -> wukong_core::pkg::Provider {
+    if cask {
+        wukong_core::pkg::Provider::Cask
+    } else {
+        via.map_or(wukong_core::pkg::Provider::Formula, Into::into)
     }
 }
 
@@ -666,16 +714,17 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Init) => init::run(),
         Some(Command::Install {
             name,
+            via,
             cask,
             no_track,
-        }) => pkg_cli::install(&name, cask, no_track),
-        Some(Command::Rm { name, cask }) => pkg_cli::rm(&name, cask),
+        }) => pkg_cli::install(&name, resolve_via(via, cask), no_track),
+        Some(Command::Rm { name, via, cask }) => pkg_cli::rm(&name, resolve_via(via, cask)),
         Some(Command::Pkg { action }) => match action {
             PkgAction::List { json } => pkg_cli::list(json),
-            PkgAction::Sync { yes } => pkg_cli::sync(yes),
+            PkgAction::Sync { yes, dry_run } => pkg_cli::sync(yes, dry_run),
             PkgAction::AdoptInstalled => pkg_cli::adopt_installed(),
-            PkgAction::Ignore { name, cask, app } => pkg_cli::ignore(&name, cask, app, false),
-            PkgAction::Unignore { name, cask, app } => pkg_cli::ignore(&name, cask, app, true),
+            PkgAction::Ignore { name, via } => pkg_cli::ignore(&name, via.into(), false),
+            PkgAction::Unignore { name, via } => pkg_cli::ignore(&name, via.into(), true),
         },
         Some(Command::Settings { action }) => match action {
             SettingsAction::List { json } => settings_cli::list(json),

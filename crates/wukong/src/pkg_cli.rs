@@ -9,35 +9,67 @@ use crate::client;
 use wukong_core::ipc::{PkgEntry, Request, Response};
 use wukong_core::pkg::Provider;
 
-pub fn install(name: &str, cask: bool, no_track: bool) -> anyhow::Result<()> {
-    brew_run(&if cask {
-        vec!["install", "--cask", name]
-    } else {
-        vec!["install", name]
-    })?;
+/// The installable providers, as a clap value enum. App is absent on
+/// purpose: wukong can only remember drag-installed apps.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum ViaArg {
+    Formula,
+    Cask,
+    Npm,
+    Pnpm,
+    Bun,
+    Cargo,
+    Pipx,
+    Uv,
+}
+
+impl From<ViaArg> for Provider {
+    fn from(via: ViaArg) -> Self {
+        match via {
+            ViaArg::Formula => Provider::Formula,
+            ViaArg::Cask => Provider::Cask,
+            ViaArg::Npm => Provider::Npm,
+            ViaArg::Pnpm => Provider::Pnpm,
+            ViaArg::Bun => Provider::Bun,
+            ViaArg::Cargo => Provider::Cargo,
+            ViaArg::Pipx => Provider::Pipx,
+            ViaArg::Uv => Provider::Uv,
+        }
+    }
+}
+
+/// Run a provider's own CLI with output streaming to the terminal.
+fn run_tool(args: &[String]) -> anyhow::Result<()> {
+    let (bin, rest) = args.split_first().expect("command table is never empty");
+    let status = std::process::Command::new(bin)
+        .args(rest)
+        .status()
+        .map_err(|_| anyhow::anyhow!("{bin} is not installed"))?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+pub fn install(name: &str, provider: Provider, no_track: bool) -> anyhow::Result<()> {
+    let args = provider
+        .install_args(name)
+        .ok_or_else(|| anyhow::anyhow!("{} cannot install", provider.as_str()))?;
+    run_tool(&args)?;
     // Even an untracked install is ACKNOWLEDGED to the daemon —
     // otherwise the watcher would offer it for adoption seconds after
     // the user explicitly opted out.
-    record(provider_of(cask), name, false, no_track);
+    record(provider, name, false, no_track);
     Ok(())
 }
 
-pub fn rm(name: &str, cask: bool) -> anyhow::Result<()> {
-    brew_run(&if cask {
-        vec!["uninstall", "--cask", name]
-    } else {
-        vec!["uninstall", name]
-    })?;
-    record(provider_of(cask), name, true, false);
+pub fn rm(name: &str, provider: Provider) -> anyhow::Result<()> {
+    let args = provider
+        .uninstall_args(name)
+        .ok_or_else(|| anyhow::anyhow!("{} cannot uninstall", provider.as_str()))?;
+    run_tool(&args)?;
+    record(provider, name, true, false);
     Ok(())
-}
-
-fn provider_of(cask: bool) -> Provider {
-    if cask {
-        Provider::Cask
-    } else {
-        Provider::Formula
-    }
 }
 
 fn record(provider: Provider, name: &str, remove: bool, observe_only: bool) {
@@ -56,18 +88,6 @@ fn record(provider: Provider, name: &str, remove: bool, observe_only: bool) {
              will offer {name} for adoption when it's back"
         ),
     }
-}
-
-/// Run brew with output streaming straight to the user's terminal.
-fn brew_run(args: &[&str]) -> anyhow::Result<()> {
-    let status = std::process::Command::new("brew")
-        .args(args)
-        .status()
-        .map_err(|_| anyhow::anyhow!("brew is not installed (https://brew.sh)"))?;
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
-    }
-    Ok(())
 }
 
 pub fn list(json: bool) -> anyhow::Result<()> {
@@ -97,34 +117,34 @@ pub fn list(json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn sync(yes: bool) -> anyhow::Result<()> {
+pub fn sync(yes: bool, dry_run: bool) -> anyhow::Result<()> {
     let missing: Vec<PkgEntry> = fetch()?.into_iter().filter(|e| !e.installed).collect();
     if missing.is_empty() {
         println!("everything in the manifest is installed");
         return Ok(());
     }
-    let (brewable, apps): (Vec<_>, Vec<_>) = missing
+    let (installable, apps): (Vec<_>, Vec<_>) = missing
         .into_iter()
-        .partition(|e| e.provider != Provider::App);
+        .partition(|e| e.provider.install_args("x").is_some());
 
-    if !brewable.is_empty() {
-        println!("will install via brew:");
-        for e in &brewable {
-            println!("  {} ({})", e.name, e.provider.as_str());
+    if !installable.is_empty() {
+        println!("will run:");
+        for e in &installable {
+            let args = e.provider.install_args(&e.name).expect("partitioned");
+            println!("  {}", args.join(" "));
         }
-        if !yes && !confirm("proceed? [y/N] ") {
-            println!("nothing installed");
-            return Ok(());
-        }
-        for e in &brewable {
-            let mut args = vec!["install"];
-            if e.provider == Provider::Cask {
-                args.push("--cask");
+        if dry_run {
+            println!("(dry run — nothing executed)");
+        } else {
+            if !yes && !confirm("proceed? [y/N] ") {
+                println!("nothing installed");
+                return Ok(());
             }
-            args.push(&e.name);
-            brew_run(&args)?;
+            for e in &installable {
+                run_tool(&e.provider.install_args(&e.name).expect("partitioned"))?;
+            }
+            println!("installed {} package(s)", installable.len());
         }
-        println!("installed {} package(s)", brewable.len());
     }
     if !apps.is_empty() {
         println!("\napps wukong remembers but cannot install — grab these yourself:");
@@ -139,12 +159,7 @@ pub fn adopt_installed() -> anyhow::Result<()> {
     crate::say(Request::PkgAdoptInstalled)
 }
 
-pub fn ignore(name: &str, cask: bool, app: bool, unignore: bool) -> anyhow::Result<()> {
-    let provider = if app {
-        Provider::App
-    } else {
-        provider_of(cask)
-    };
+pub fn ignore(name: &str, provider: Provider, unignore: bool) -> anyhow::Result<()> {
     crate::say(Request::PkgIgnore {
         provider,
         name: name.to_string(),

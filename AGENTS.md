@@ -116,8 +116,20 @@ application that may sit nearby on disk as `../wukong-backup`).
   manifest/ignore, or manifest member gone). The first reconcile ever
   baselines silently behind an explicit `__meta__` marker row — a
   pre-wukong machine must not open fifty inbox items. Detection reads
-  Cellar receipts (`installed_on_request`), Caskroom dirs, and .app
-  bundles — never shell out to brew in the daemon.
+  each manager's own on-disk receipts: Cellar receipts
+  (`installed_on_request`), Caskroom dirs, .app bundles, global
+  `node_modules` trees (npm/pnpm/bun, `@scope/name` expanded, `.bin`
+  and hidden entries skipped), `~/.cargo/.crates.toml`, and pipx/uv
+  venv dirs.
+- **Provider shell-outs are startup-only.** The daemon may fork a
+  package manager exactly once per root, at startup or on the rescan
+  heartbeat (`redetect_roots`), to LOCATE a root (`npm root -g`,
+  `pnpm root -g`) — never during reconcile, and never to LIST
+  packages. A `[packages.roots]` override suppresses even that fork
+  (defaults are lazy); an override pointing at a nonexistent dir
+  disables the provider. Engine tests MUST override all six language
+  providers to absent paths (see `pkg_rig`) or the developer's real
+  machine leaks into the suite.
 - **Settings: read plists, write `defaults`, never the reverse.**
   Reads go straight to the preference plists (fast, forkless, the
   `plist` crate); writes MUST go through the `defaults` CLI or
@@ -154,7 +166,7 @@ The toolchain is pinned in rust-toolchain.toml so local and CI clippy
 always agree; bump it deliberately, in its own commit.
 
 The live drills ARE in the repo: `make drill` runs both
-(`drills/dotfiles.sh`, `drills/packages.sh`) — the real daemon in a
+(`drills/dotfiles.sh`, `drills/packages.sh`, `drills/settings.sh`) — the real daemon in a
 sandboxed HOME/XDG tempdir, replaying every failure mode past reviews
 found. CI runs them on every push. Extend the drills whenever a new
 failure mode is fixed; never run the daemon against the real `$HOME`

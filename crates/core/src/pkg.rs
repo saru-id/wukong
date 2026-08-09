@@ -15,7 +15,7 @@
 //! debounced reconcile.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Where the manifest lives inside the store repo. The `__wukong__`
@@ -29,26 +29,91 @@ pub enum Provider {
     Formula,
     Cask,
     App,
+    Npm,
+    Pnpm,
+    Bun,
+    Cargo,
+    Pipx,
+    Uv,
 }
 
 impl Provider {
+    /// Every provider, in display order.
+    pub const ALL: [Provider; 9] = [
+        Provider::Formula,
+        Provider::Cask,
+        Provider::App,
+        Provider::Npm,
+        Provider::Pnpm,
+        Provider::Bun,
+        Provider::Cargo,
+        Provider::Pipx,
+        Provider::Uv,
+    ];
+
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Provider::Formula => "formula",
             Provider::Cask => "cask",
             Provider::App => "app",
+            Provider::Npm => "npm",
+            Provider::Pnpm => "pnpm",
+            Provider::Bun => "bun",
+            Provider::Cargo => "cargo",
+            Provider::Pipx => "pipx",
+            Provider::Uv => "uv",
         }
     }
 
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "formula" => Some(Provider::Formula),
-            "cask" => Some(Provider::Cask),
-            "app" => Some(Provider::App),
-            _ => None,
-        }
+        Self::ALL.into_iter().find(|p| p.as_str() == s)
+    }
+
+    /// The command that installs one package via this provider —
+    /// `None` for App, which wukong can only remember.
+    #[must_use]
+    pub fn install_args(self, name: &str) -> Option<Vec<String>> {
+        let argv: &[&str] = match self {
+            Provider::Formula => &["brew", "install"],
+            Provider::Cask => &["brew", "install", "--cask"],
+            Provider::App => return None,
+            Provider::Npm => &["npm", "install", "-g"],
+            Provider::Pnpm => &["pnpm", "add", "-g"],
+            Provider::Bun => &["bun", "add", "-g"],
+            Provider::Cargo => &["cargo", "install"],
+            Provider::Pipx => &["pipx", "install"],
+            Provider::Uv => &["uv", "tool", "install"],
+        };
+        Some(
+            argv.iter()
+                .map(ToString::to_string)
+                .chain([name.to_string()])
+                .collect(),
+        )
+    }
+
+    /// The command that uninstalls one package via this provider.
+    #[must_use]
+    pub fn uninstall_args(self, name: &str) -> Option<Vec<String>> {
+        let argv: &[&str] = match self {
+            Provider::Formula => &["brew", "uninstall"],
+            Provider::Cask => &["brew", "uninstall", "--cask"],
+            Provider::App => return None,
+            Provider::Npm => &["npm", "uninstall", "-g"],
+            Provider::Pnpm => &["pnpm", "remove", "-g"],
+            Provider::Bun => &["bun", "remove", "-g"],
+            Provider::Cargo => &["cargo", "uninstall"],
+            Provider::Pipx => &["pipx", "uninstall"],
+            Provider::Uv => &["uv", "tool", "uninstall"],
+        };
+        Some(
+            argv.iter()
+                .map(ToString::to_string)
+                .chain([name.to_string()])
+                .collect(),
+        )
     }
 }
 
@@ -65,39 +130,29 @@ pub fn parse_subject(s: &str) -> Option<(Provider, &str)> {
 }
 
 /// The manifest: what this machine should have, and what it should
-/// never be asked about again. `BTreeSets` keep the file sorted so diffs
-/// stay one-line-per-change.
+/// never be asked about again — keyed by provider, so a new provider
+/// is a table entry, not a schema change. `BTreeMap`/`BTreeSet` keep
+/// the file sorted and diffs one line per change.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Manifest {
-    pub formulae: BTreeSet<String>,
-    pub casks: BTreeSet<String>,
-    pub apps: BTreeSet<String>,
-    pub ignore: Ignore,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct Ignore {
-    pub formulae: BTreeSet<String>,
-    pub casks: BTreeSet<String>,
-    pub apps: BTreeSet<String>,
+    /// provider → wanted package names.
+    pub packages: BTreeMap<String, BTreeSet<String>>,
+    /// provider → names never offered again.
+    pub ignore: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Manifest {
-    /// `Ok(None)` = no manifest yet. A manifest that exists but fails
-    /// to parse is an error the caller must handle — silently starting
-    /// empty and then saving would erase the real one.
     pub fn load(store_dir: &Path) -> Result<Option<Self>, String> {
         let path = store_dir.join(MANIFEST_REL);
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+            Err(e) => return Err(format!("cannot read package manifest: {e}")),
         };
         toml::from_str(&text)
             .map(Some)
-            .map_err(|e| format!("{} does not parse: {e}", path.display()))
+            .map_err(|e| format!("package manifest does not parse: {e}"))
     }
 
     pub fn save(&self, store_dir: &Path) -> std::io::Result<()> {
@@ -109,134 +164,227 @@ impl Manifest {
         std::fs::write(path, text)
     }
 
-    fn set(&mut self, provider: Provider) -> &mut BTreeSet<String> {
-        match provider {
-            Provider::Formula => &mut self.formulae,
-            Provider::Cask => &mut self.casks,
-            Provider::App => &mut self.apps,
-        }
-    }
-
-    fn ignore_set(&mut self, provider: Provider) -> &mut BTreeSet<String> {
-        match provider {
-            Provider::Formula => &mut self.ignore.formulae,
-            Provider::Cask => &mut self.ignore.casks,
-            Provider::App => &mut self.ignore.apps,
-        }
-    }
-
     #[must_use]
     pub fn contains(&self, provider: Provider, name: &str) -> bool {
-        match provider {
-            Provider::Formula => self.formulae.contains(name),
-            Provider::Cask => self.casks.contains(name),
-            Provider::App => self.apps.contains(name),
-        }
+        self.packages
+            .get(provider.as_str())
+            .is_some_and(|set| set.contains(name))
     }
 
     #[must_use]
     pub fn ignored(&self, provider: Provider, name: &str) -> bool {
-        match provider {
-            Provider::Formula => self.ignore.formulae.contains(name),
-            Provider::Cask => self.ignore.casks.contains(name),
-            Provider::App => self.ignore.apps.contains(name),
-        }
+        self.ignore
+            .get(provider.as_str())
+            .is_some_and(|set| set.contains(name))
     }
 
     /// Add to the wanted set (and drop any standing ignore — an
     /// explicit add outranks an old "never ask").
     pub fn add(&mut self, provider: Provider, name: &str) -> bool {
-        self.ignore_set(provider).remove(name);
-        self.set(provider).insert(name.to_string())
+        if let Some(ignored) = self.ignore.get_mut(provider.as_str()) {
+            ignored.remove(name);
+        }
+        self.packages
+            .entry(provider.as_str().to_string())
+            .or_default()
+            .insert(name.to_string())
     }
 
     pub fn remove(&mut self, provider: Provider, name: &str) -> bool {
-        self.set(provider).remove(name)
+        self.packages
+            .get_mut(provider.as_str())
+            .is_some_and(|set| set.remove(name))
     }
 
     /// Permanent opt-out: never offer this package again.
     pub fn add_ignore(&mut self, provider: Provider, name: &str) -> bool {
-        self.set(provider).remove(name);
-        self.ignore_set(provider).insert(name.to_string())
+        if let Some(wanted) = self.packages.get_mut(provider.as_str()) {
+            wanted.remove(name);
+        }
+        self.ignore
+            .entry(provider.as_str().to_string())
+            .or_default()
+            .insert(name.to_string())
     }
 
     pub fn remove_ignore(&mut self, provider: Provider, name: &str) -> bool {
-        self.ignore_set(provider).remove(name)
+        self.ignore
+            .get_mut(provider.as_str())
+            .is_some_and(|set| set.remove(name))
     }
 
+    /// Every manifest entry in provider display order.
     #[must_use]
     pub fn entries(&self) -> Vec<(Provider, String)> {
         let mut out = Vec::new();
-        for n in &self.formulae {
-            out.push((Provider::Formula, n.clone()));
-        }
-        for n in &self.casks {
-            out.push((Provider::Cask, n.clone()));
-        }
-        for n in &self.apps {
-            out.push((Provider::App, n.clone()));
+        for provider in Provider::ALL {
+            if let Some(names) = self.packages.get(provider.as_str()) {
+                for name in names {
+                    out.push((provider, name.clone()));
+                }
+            }
         }
         out
     }
 }
 
-/// Where the detectors look. Injectable so tests (and the live drill)
-/// can point them at a fake tree; production auto-detects.
-#[derive(Debug, Clone)]
-pub struct PkgRoots {
-    pub cellar: Option<PathBuf>,
-    pub caskroom: Option<PathBuf>,
-    pub applications: Option<PathBuf>,
+/// One place a provider's installs can be observed, plus HOW to read
+/// it. A new provider is a root kind and a command table — nothing
+/// else changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootKind {
+    /// Homebrew Cellar: receipts separate requests from dependencies.
+    Cellar,
+    /// Plain directory-per-package (Caskroom, pipx venvs, uv tools).
+    DirNames,
+    /// `.app` bundles, named without the extension.
+    AppBundles,
+    /// A global `node_modules`: subdirectories, `@scope/name` expanded,
+    /// `.bin` skipped.
+    NodeModules,
+    /// cargo's `.crates.toml` registry inside the given directory.
+    CratesToml,
 }
 
-impl PkgRoots {
-    /// Auto-detect: Apple Silicon prefix first, then Intel. A missing
-    /// brew simply yields no brew roots — package governance degrades
-    /// to app observation.
-    pub fn detect(brew_prefix: Option<&Path>, applications_dir: Option<&Path>) -> Self {
-        let prefix = brew_prefix.map(Path::to_path_buf).or_else(|| {
-            ["/opt/homebrew", "/usr/local"]
-                .iter()
-                .map(PathBuf::from)
-                .find(|p| p.join("Cellar").is_dir() || p.join("Caskroom").is_dir())
-        });
-        let existing = |p: PathBuf| if p.is_dir() { Some(p) } else { None };
-        Self {
-            cellar: prefix.as_ref().and_then(|p| existing(p.join("Cellar"))),
-            caskroom: prefix.as_ref().and_then(|p| existing(p.join("Caskroom"))),
-            applications: existing(
-                applications_dir.map_or_else(|| PathBuf::from("/Applications"), Path::to_path_buf),
-            ),
-        }
+#[derive(Debug, Clone)]
+pub struct ProviderRoot {
+    pub provider: Provider,
+    pub kind: RootKind,
+    pub path: PathBuf,
+}
+
+impl ProviderRoot {
+    /// What the daemon should watch for this root, and how. Global
+    /// `node_modules` trees are watched recursively (they are small and
+    /// installs mutate deep paths); everything else observes direct
+    /// children only.
+    #[must_use]
+    pub fn watch(&self) -> (PathBuf, bool) {
+        (self.path.clone(), self.kind == RootKind::NodeModules)
     }
 
-    /// Everything installed right now, per provider. A provider whose
-    /// root cannot be enumerated is OMITTED rather than reported empty
-    /// — one failed `read_dir` must not turn the whole manifest into
-    /// "package gone" offers.
+    /// Everything installed under this root right now. `None` when
+    /// the root cannot be enumerated — one failed read must not turn
+    /// the whole manifest into "package gone" offers.
+    #[must_use]
+    pub fn installed(&self) -> Option<BTreeSet<String>> {
+        match self.kind {
+            RootKind::Cellar => installed_formulae(&self.path),
+            RootKind::DirNames => list_dirs(&self.path),
+            RootKind::AppBundles => installed_apps(&self.path),
+            RootKind::NodeModules => node_modules(&self.path),
+            RootKind::CratesToml => crates_toml(&self.path),
+        }
+    }
+}
+
+/// The full set of observation roots for this machine.
+#[derive(Debug, Clone, Default)]
+pub struct Roots(pub Vec<ProviderRoot>);
+
+impl Roots {
     #[must_use]
     pub fn installed(&self) -> Vec<(Provider, BTreeSet<String>)> {
-        let mut out = Vec::new();
-        if let Some(set) = self.cellar.as_deref().and_then(installed_formulae) {
-            out.push((Provider::Formula, set));
-        }
-        if let Some(set) = self.caskroom.as_deref().and_then(installed_casks) {
-            out.push((Provider::Cask, set));
-        }
-        if let Some(set) = self.applications.as_deref().and_then(installed_apps) {
-            out.push((Provider::App, set));
-        }
-        out
+        self.0
+            .iter()
+            .filter_map(|root| root.installed().map(|set| (root.provider, set)))
+            .collect()
     }
 
     #[must_use]
-    pub fn watch_roots(&self) -> Vec<PathBuf> {
-        [&self.cellar, &self.caskroom, &self.applications]
-            .into_iter()
-            .flatten()
-            .cloned()
-            .collect()
+    pub fn watch_roots(&self) -> Vec<(PathBuf, bool)> {
+        self.0.iter().map(ProviderRoot::watch).collect()
     }
+
+    #[must_use]
+    pub fn cellar(&self) -> Option<&Path> {
+        self.0
+            .iter()
+            .find(|r| r.kind == RootKind::Cellar)
+            .map(|r| r.path.as_path())
+    }
+}
+
+/// Detect every observable root. Fixed paths are preferred; npm and
+/// pnpm keep their global root wherever they please, so those two are
+/// asked ONCE, here at startup — never during reconcile. `overrides`
+/// (config `[packages.roots]`) pins any provider to a path, which is
+/// also how sandboxed runs point wukong at fake trees.
+#[must_use]
+pub fn detect_roots(
+    brew_prefix: Option<&Path>,
+    applications_dir: Option<&Path>,
+    overrides: &BTreeMap<String, PathBuf>,
+    home: &Path,
+) -> Roots {
+    let mut roots = Vec::new();
+    // Defaults are LAZY: an override must fully suppress the default's
+    // cost (asking npm for its root forks a process).
+    let mut push =
+        |provider: Provider, kind: RootKind, default: &mut dyn FnMut() -> Option<PathBuf>| {
+            let path = overrides.get(provider.as_str()).cloned().or_else(default);
+            if let Some(path) = path
+                && path.is_dir()
+            {
+                roots.push(ProviderRoot {
+                    provider,
+                    kind,
+                    path,
+                });
+            }
+        };
+
+    let prefix = brew_prefix.map(Path::to_path_buf).or_else(|| {
+        ["/opt/homebrew", "/usr/local"]
+            .iter()
+            .map(PathBuf::from)
+            .find(|p| p.join("Cellar").is_dir() || p.join("Caskroom").is_dir())
+    });
+    push(Provider::Formula, RootKind::Cellar, &mut || {
+        prefix.as_ref().map(|p| p.join("Cellar"))
+    });
+    push(Provider::Cask, RootKind::DirNames, &mut || {
+        prefix.as_ref().map(|p| p.join("Caskroom"))
+    });
+    push(Provider::App, RootKind::AppBundles, &mut || {
+        Some(applications_dir.map_or_else(|| PathBuf::from("/Applications"), Path::to_path_buf))
+    });
+    push(Provider::Npm, RootKind::NodeModules, &mut || {
+        global_root("npm", &["root", "-g"])
+    });
+    push(Provider::Pnpm, RootKind::NodeModules, &mut || {
+        global_root("pnpm", &["root", "-g"])
+    });
+    push(Provider::Bun, RootKind::NodeModules, &mut || {
+        Some(home.join(".bun/install/global/node_modules"))
+    });
+    push(Provider::Cargo, RootKind::CratesToml, &mut || {
+        Some(home.join(".cargo"))
+    });
+    push(Provider::Pipx, RootKind::DirNames, &mut || {
+        [".local/pipx/venvs", ".local/share/pipx/venvs"]
+            .iter()
+            .map(|rel| home.join(rel))
+            .find(|p| p.is_dir())
+    });
+    push(Provider::Uv, RootKind::DirNames, &mut || {
+        Some(home.join(".local/share/uv/tools"))
+    });
+    Roots(roots)
+}
+
+/// Ask a tool for its global root — startup only, and only when the
+/// tool exists on PATH.
+fn global_root(binary: &str, args: &[&str]) -> Option<PathBuf> {
+    let out = std::process::Command::new(binary)
+        .args(args)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    path.is_dir().then_some(path)
 }
 
 #[derive(Debug, Deserialize)]
@@ -312,6 +460,52 @@ pub fn installed_apps(applications: &Path) -> Option<BTreeSet<String>> {
                 let name = e.file_name().to_string_lossy().into_owned();
                 name.strip_suffix(".app").map(str::to_string)
             })
+            .collect(),
+    )
+}
+
+/// Global `node_modules`: package dirs, `@scope/name` expanded, `.bin`
+/// and hidden entries skipped.
+fn node_modules(dir: &Path) -> Option<BTreeSet<String>> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut out = BTreeSet::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || !entry.path().is_dir() {
+            continue;
+        }
+        if let Some(scope) = name.strip_prefix('@') {
+            let Ok(scoped) = std::fs::read_dir(entry.path()) else {
+                continue;
+            };
+            for pkg in scoped.flatten() {
+                let pkg_name = pkg.file_name().to_string_lossy().into_owned();
+                if !pkg_name.starts_with('.') && pkg.path().is_dir() {
+                    out.insert(format!("@{scope}/{pkg_name}"));
+                }
+            }
+        } else {
+            out.insert(name);
+        }
+    }
+    Some(out)
+}
+
+/// cargo's own registry of installed binaries: `.crates.toml`, whose
+/// `[v1]` keys are "name version (source)".
+fn crates_toml(cargo_home: &Path) -> Option<BTreeSet<String>> {
+    let text = match std::fs::read_to_string(cargo_home.join(".crates.toml")) {
+        Ok(t) => t,
+        // No file = no cargo installs yet; an empty set is the truth.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(BTreeSet::new()),
+        Err(_) => return None,
+    };
+    let doc: toml::Table = toml::from_str(&text).ok()?;
+    let v1 = doc.get("v1")?.as_table()?;
+    Some(
+        v1.keys()
+            .filter_map(|entry| entry.split_whitespace().next())
+            .map(ToString::to_string)
             .collect(),
     )
 }
@@ -406,5 +600,74 @@ mod tests {
         assert_eq!(s, "cask:raycast");
         assert_eq!(parse_subject(&s), Some((Provider::Cask, "raycast")));
         assert_eq!(parse_subject("nope"), None);
+    }
+}
+
+#[cfg(test)]
+mod detector_tests {
+    use super::*;
+
+    #[test]
+    fn node_modules_expands_scopes_and_skips_bin() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for dir in ["typescript", "@biomejs/biome", ".bin", ".hidden"] {
+            std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+        }
+        let found = node_modules(tmp.path()).unwrap();
+        assert_eq!(
+            found.into_iter().collect::<Vec<_>>(),
+            vec!["@biomejs/biome", "typescript"]
+        );
+    }
+
+    #[test]
+    fn crates_toml_reads_cargo_installs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join(".crates.toml"),
+            "[v1]\n\"ripgrep 14.1.0 (registry+https://github.com/rust-lang/crates.io-index)\" = [\"rg\"]\n\"fd-find 10.0.0 (registry+https://github.com/rust-lang/crates.io-index)\" = [\"fd\"]\n",
+        )
+        .unwrap();
+        let found = crates_toml(tmp.path()).unwrap();
+        assert_eq!(
+            found.into_iter().collect::<Vec<_>>(),
+            vec!["fd-find", "ripgrep"]
+        );
+        // No file yet = truthfully empty, not an error.
+        let empty = tempfile::TempDir::new().unwrap();
+        assert_eq!(crates_toml(empty.path()).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn provider_command_tables_are_complete() {
+        for provider in Provider::ALL {
+            let install = provider.install_args("x");
+            let uninstall = provider.uninstall_args("x");
+            assert_eq!(install.is_some(), uninstall.is_some(), "{provider:?}");
+            if provider == Provider::App {
+                assert!(install.is_none());
+            } else {
+                assert!(install.unwrap().len() >= 3);
+            }
+        }
+    }
+
+    #[test]
+    fn overridden_roots_win_and_absent_paths_disable() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let npm = tmp.path().join("npmroot");
+        std::fs::create_dir_all(&npm).unwrap();
+        let mut overrides = BTreeMap::new();
+        overrides.insert("npm".to_string(), npm.clone());
+        overrides.insert("cargo".to_string(), tmp.path().join("absent"));
+        let roots = detect_roots(
+            Some(tmp.path().join("nobrew").as_path()),
+            Some(tmp.path().join("noapps").as_path()),
+            &overrides,
+            tmp.path().join("home").as_path(),
+        );
+        let npm_root = roots.0.iter().find(|r| r.provider == Provider::Npm);
+        assert_eq!(npm_root.map(|r| r.path.clone()), Some(npm));
+        assert!(!roots.0.iter().any(|r| r.provider == Provider::Cargo));
     }
 }
