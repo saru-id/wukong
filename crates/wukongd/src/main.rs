@@ -25,7 +25,7 @@ use watcher::WatchSignal;
 use wukong_core::ipc::{Envelope, PROTOCOL_VERSION, Request, Response};
 use wukong_core::{Config, paths};
 
-/// Full-rescan heartbeat: belt-and-braces for FSEvents gaps across
+/// Full-rescan heartbeat: belt-and-braces for `FSEvents` gaps across
 /// sleep/wake on a machine nobody is watching.
 #[allow(clippy::duration_suboptimal_units)] // Duration::from_hours is unstable
 const RESCAN_INTERVAL: Duration = Duration::from_secs(6 * 3600);
