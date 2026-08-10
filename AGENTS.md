@@ -199,6 +199,13 @@ application that may sit nearby on disk as `../wukong-backup`).
   flow pick it up — never a git rewrite, and a reverted-to secret
   still quarantines.
 
+- **Every fork gets a deadline; every test forks nothing real.** Any
+  child process the daemon spawns (push 120s, root probes 10s) has a
+  hard wall clock — a wedged shim costs its feature, never the
+  daemon. And no unit test may fork a real package manager: a hanging
+  `pnpm root -g` once froze the suite for two hours. Override npm AND
+  pnpm to absent paths in every detect_roots test.
+
 ## Verification
 
 ```sh
@@ -212,7 +219,8 @@ The toolchain is pinned in rust-toolchain.toml so local and CI clippy
 always agree; bump it deliberately, in its own commit.
 
 The live drills ARE in the repo: `make drill` runs both
-(`drills/dotfiles.sh`, `drills/packages.sh`, `drills/settings.sh`) — the real daemon in a
+(`drills/dotfiles.sh`, `drills/packages.sh`, `drills/settings.sh`,
+`drills/shared.sh`, `drills/dayone.sh`) — the real daemon in a
 sandboxed HOME/XDG tempdir, replaying every failure mode past reviews
 found. CI runs them on every push. Extend the drills whenever a new
 failure mode is fixed; never run the daemon against the real `$HOME`

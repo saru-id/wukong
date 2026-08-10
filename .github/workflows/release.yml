@@ -27,6 +27,15 @@ jobs:
           ./target/release/wukong gen-completions zsh > "$STAGE/share/zsh/site-functions/_wukong"
           tar czf "$STAGE.tar.gz" "$STAGE"
           shasum -a 256 "$STAGE.tar.gz" > "$STAGE.tar.gz.sha256"
+      - name: Rehearse day one from the tarball
+        # The artifact we attach is the artifact we tested: unpack the
+        # tarball into a fresh directory and run the full day-one
+        # drill against those exact binaries.
+        run: |
+          STAGE="wukong-${{ github.event.release.tag_name }}-aarch64-apple-darwin"
+          REHEARSAL=$(mktemp -d)
+          tar xzf "$STAGE.tar.gz" -C "$REHEARSAL"
+          WUKONG_BIN_DIR="$REHEARSAL/$STAGE" bash drills/dayone.sh
       - name: Attach to release
         env:
           GH_TOKEN: ${{ github.token }}

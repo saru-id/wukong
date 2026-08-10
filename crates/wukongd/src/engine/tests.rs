@@ -1414,3 +1414,31 @@ fn editing_the_secret_away_closes_the_stale_quarantine() {
     assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
     assert_eq!(store_content(&rig, &file).as_deref(), Some("export A=2\n"));
 }
+
+#[test]
+fn crash_loop_is_noticed_from_the_event_trail() {
+    let mut rig = rig();
+    // Five extra starts (Engine::new logged one) — under the bar.
+    for _ in 0..4 {
+        soft(
+            rig.engine
+                .db
+                .record(EventKind::DaemonStarted, "testbox", ""),
+        );
+    }
+    assert_eq!(rig.engine.health_tick_forced(), 0);
+    soft(
+        rig.engine
+            .db
+            .record(EventKind::DaemonStarted, "testbox", ""),
+    );
+    let new = rig.engine.health_tick_forced();
+    assert_eq!(new, 1);
+    let item = &rig.engine.db.inbox_open().unwrap()[0];
+    assert_eq!(item.subject, "daemon");
+    assert!(
+        item.body.contains("daemon starts in the last hour"),
+        "{}",
+        item.body
+    );
+}

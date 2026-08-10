@@ -77,8 +77,31 @@ pub fn run(yes: bool) -> anyhow::Result<()> {
         config.machine
     );
 
-    crate::launchd::install()?;
-    println!("✓ launchd agent installed and started");
+    if std::env::var_os("WUKONG_NO_AGENT").is_some() {
+        // Drill escape hatch: the day-one rehearsal must exercise this
+        // exact code path without touching the real launchd. The
+        // daemon binary sits beside this one; its pid lands in the
+        // state dir so the sandbox can stop it.
+        let daemon = std::env::current_exe()?
+            .parent()
+            .map(|d| d.join("wukongd"))
+            .filter(|p| p.is_file())
+            .ok_or_else(|| anyhow::anyhow!("wukongd not found beside wukong"))?;
+        paths::ensure_private_dir(&paths::state_dir())?;
+        let child = std::process::Command::new(daemon)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        std::fs::write(
+            paths::state_dir().join("wukongd.pid"),
+            child.id().to_string(),
+        )?;
+        println!("✓ daemon started directly (WUKONG_NO_AGENT)");
+    } else {
+        crate::launchd::install()?;
+        println!("✓ launchd agent installed and started");
+    }
 
     // The right next step, offered here so setup is ONE command. Both
     // paths show their full plan and take one confirmation (--yes

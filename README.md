@@ -203,7 +203,13 @@ make drill   # live drills: the real daemon in a sandbox
 ```
 
 CI runs the same on every push — plus the RustSec advisory scan
-(weekly too), the property tests, and both live drills. Releases get
+(weekly too), the property tests, and all five live drills, including
+the day-one dress rehearsal: a real `wukong init` on two sandboxed
+machines, the idle-footprint bound (the daemon must stay under 64MB
+and use ~zero CPU at rest — measured, not claimed), and `wukong
+doctor --deep`, the restore fire-drill that decrypts every sealed
+blob before the day you need it. Release tarballs run the rehearsal
+themselves before they are attached. Releases get
 an arm64 tarball attached automatically on publish, complete with man
 pages (`man wukong`, `man wukong-resolve`, …) and zsh completions;
 `wukong <command> --help` explains every verb's exact semantics.

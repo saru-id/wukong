@@ -120,6 +120,7 @@ sleep 0.5
 "$W" restore ~/.env --force > /dev/null 2>&1 || "$W" restore ~/.env > /dev/null
 check "restore decrypts the sealed file" "grep -q '$SEALTOK' '$HOME/.env'"
 check "doctor reports the seal identity unlocks this store" "\"$W\" doctor | grep -q 'seal identity unlocks this store'"
+check "deep doctor decrypts every sealed blob" "\"$W\" doctor --deep | grep -q 'sealed blob(s) decrypt with this machine'"
 
 echo "=== sentinel discovery + forbidden skip"
 echo 'eval brew shellenv' > "$HOME/.zprofile"

@@ -151,3 +151,38 @@ proptest! {
         prop_assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }
+
+// ---- The untrusted-input parsers must be panic-free by proof, not
+// by inspection: gobuild reads arbitrary binaries off disk, seal
+// sniffs arbitrary store bytes.
+
+proptest! {
+    #[test]
+    fn gobuild_read_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
+        let _ = wukong_core::gobuild::read(&bytes);
+    }
+
+    #[test]
+    fn gobuild_read_survives_truncated_real_blobs(cut in 0usize..200) {
+        let blob = wukong_core::gobuild::synthesize("github.com/x/tool", "v1.2.3");
+        let cut = cut.min(blob.len());
+        let _ = wukong_core::gobuild::read(&blob[..cut]);
+    }
+
+    #[test]
+    fn gobuild_read_survives_corrupted_real_blobs(
+        pos in 0usize..200,
+        byte in any::<u8>(),
+    ) {
+        let mut blob = wukong_core::gobuild::synthesize("github.com/x/tool", "v1.2.3");
+        let pos = pos.min(blob.len() - 1);
+        blob[pos] = byte;
+        let _ = wukong_core::gobuild::read(&blob);
+    }
+
+    #[test]
+    fn seal_sniffing_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..1024)) {
+        let _ = wukong_core::seal::is_sealed(&bytes);
+        let _ = wukong_core::seal::content_hash(&bytes);
+    }
+}

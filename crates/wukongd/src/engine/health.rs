@@ -37,7 +37,17 @@ impl Engine {
             return 0;
         }
         self.last_health = std::time::Instant::now();
-        self.check_push_health() + self.check_quarantine_age()
+        self.health_checks()
+    }
+
+    /// The checks themselves, gate-free — what tests call.
+    #[cfg(test)]
+    pub(super) fn health_tick_forced(&mut self) -> usize {
+        self.health_checks()
+    }
+
+    fn health_checks(&mut self) -> usize {
+        self.check_push_health() + self.check_quarantine_age() + self.check_crash_loop()
     }
 
     /// A Health item files at most once per REALERT window per
@@ -158,6 +168,71 @@ impl Engine {
                  approve — nothing to run; open `wukong` and answer them\n\
                  skip    — dismiss for a day"
             ),
+        )
+    }
+
+    /// The one failure the watchdog can't see from inside: itself
+    /// dying repeatedly while launchd dutifully restarts it. Clustered
+    /// start events are that story told from the outside.
+    fn check_crash_loop(&mut self) -> usize {
+        let Ok(events) = self.db.events(100) else {
+            return 0;
+        };
+        let recent_starts = events
+            .iter()
+            .filter(|e| e.kind == EventKind::DaemonStarted.as_str())
+            .filter(|e| age_secs(&e.ts).is_some_and(|age| age < 3600))
+            .count();
+        if recent_starts < 6 {
+            return 0;
+        }
+        self.health_alert(
+            "daemon",
+            "the daemon is crash-looping",
+            &format!(
+                "{recent_starts} daemon starts in the last hour — launchd keeps \
+                 restarting a process that keeps dying. The log usually says why:\n  \
+                 ~/.local/state/wukong/wukongd.log\n\n\
+                 approve — nothing to run; read the log\n\
+                 skip    — dismiss for a day"
+            ),
+        )
+    }
+
+    /// A machine whose seal identity cannot decrypt what this store
+    /// encrypts looks healthy right up until the day the restore
+    /// matters. Probed on the rescan cadence, not at disaster time.
+    pub(super) fn check_seal_health(&mut self) -> usize {
+        let any_sealed = self
+            .db
+            .tracked()
+            .is_ok_and(|rows| rows.iter().any(|(_, sealed, _)| *sealed));
+        if !any_sealed {
+            return 0;
+        }
+        let recipient =
+            std::fs::read_to_string(self.store.dir().join(wukong_core::seal::RECIPIENT_REL));
+        let id_store = wukong_core::seal::IdentityStore::from_config(
+            self.config.seal.identity_file.as_deref(),
+        );
+        let unlocks = match (id_store.load(), recipient) {
+            (Ok(Some(identity)), Ok(recipient)) => {
+                wukong_core::seal::encrypt(recipient.trim(), b"probe")
+                    .is_ok_and(|probe| wukong_core::seal::decrypt(&identity, &probe).is_ok())
+            }
+            _ => false,
+        };
+        if unlocks {
+            return 0;
+        }
+        self.health_alert(
+            "seal",
+            "sealed files cannot be decrypted on this machine",
+            "This machine tracks sealed files, but its seal identity is \
+             missing or does not match the store's recipient — a restore \
+             would fail exactly when it matters.\n\n\
+             approve — nothing to run; `wukong seal-key import` the right key\n\
+             skip    — dismiss for a day",
         )
     }
 

@@ -468,9 +468,17 @@ wukong uninstall --purge         remove local data too (confirms first)")]
     #[command(
         long_about = "Check the whole setup: config parses, store exists, remote configured \
 and REACHABLE, daemon running, launchd agent installed — plus the \
-tracked/inbox/unpushed counts and the last push age."
+tracked/inbox/unpushed counts and the last push age.\n\n\
+--deep is the restore fire-drill: git fsck on the store, a dry-run \
+restore, and a real decryption of EVERY sealed blob with this \
+machine's identity — because backups you haven't tested aren't \
+backups. Run it before you need it."
     )]
-    Doctor,
+    Doctor {
+        /// The restore fire-drill: prove every stored byte usable
+        #[arg(long)]
+        deep: bool,
+    },
 
     /// Generate man pages into a directory
     #[command(hide = true)]
@@ -952,8 +960,11 @@ fn main() -> anyhow::Result<()> {
         }),
         Some(Command::Daemon { action }) => launchd::run(action),
         Some(Command::Uninstall { purge, yes }) => launchd::uninstall(purge, yes),
-        Some(Command::Doctor) => {
+        Some(Command::Doctor { deep }) => {
             doctor();
+            if deep {
+                doctor_deep();
+            }
             Ok(())
         }
         Some(Command::GenMan { dir }) => gen_man(&dir),
@@ -1149,6 +1160,76 @@ fn doctor() {
                 age_of(s.last_push.as_deref())
             );
         }
+    }
+}
+
+/// The restore fire-drill: prove every stored byte is actually
+/// usable, TODAY, on this machine — not on the day the disk dies.
+fn doctor_deep() {
+    use wukong_core::{paths, seal, store::Store};
+    let check = |ok: bool, label: &str| println!("{} {label}", if ok { "✓" } else { "✗" });
+    println!("\ndeep checks (the restore fire-drill):");
+
+    // The store graph itself.
+    let config = wukong_core::Config::load()
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    match Store::open(&paths::store_dir(), &config.machine) {
+        Ok(store) => {
+            check(store.fsck().is_ok(), "store passes git fsck");
+
+            // Every sealed blob must decrypt with THIS machine's
+            // identity — in both lanes.
+            let id_store = seal::IdentityStore::from_config(config.seal.identity_file.as_deref());
+            let identity = id_store.load().ok().flatten();
+            let (mut sealed, mut failed) = (0usize, Vec::new());
+            for lane in [store.clone(), store.shared()] {
+                for rel in lane.files().unwrap_or_default() {
+                    let Ok(bytes) = std::fs::read(lane.dir().join(&rel)) else {
+                        continue;
+                    };
+                    if !seal::is_sealed(&bytes) {
+                        continue;
+                    }
+                    sealed += 1;
+                    let ok = identity
+                        .as_deref()
+                        .is_some_and(|id| seal::decrypt(id, &bytes).is_ok());
+                    if !ok {
+                        failed.push(rel.to_string_lossy().into_owned());
+                    }
+                }
+            }
+            if sealed == 0 {
+                println!("  (no sealed files — nothing to decrypt)");
+            } else {
+                check(
+                    failed.is_empty(),
+                    &format!("all {sealed} sealed blob(s) decrypt with this machine's identity"),
+                );
+                for rel in failed {
+                    println!("    cannot decrypt: {rel} — `wukong seal-key import`");
+                }
+            }
+        }
+        Err(e) => check(false, &format!("store unreadable: {e}")),
+    }
+
+    // Would restore actually have work to do, and can the daemon say?
+    match client::call(Request::Restore {
+        path: None,
+        force: false,
+        dry_run: true,
+    }) {
+        Ok(Response::Ok { message }) => {
+            check(true, "dry-run restore answers");
+            for line in message.lines() {
+                println!("    {line}");
+            }
+        }
+        Ok(Response::Error { message }) => println!("  restore plan: {message}"),
+        _ => check(false, "daemon not answering — dry-run restore skipped"),
     }
 }
 

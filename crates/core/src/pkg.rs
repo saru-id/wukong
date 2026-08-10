@@ -710,17 +710,39 @@ fn push_root(
 }
 
 /// Ask a tool for its global root — startup only, and only when the
-/// tool exists on PATH.
+/// tool exists on PATH. Hard 10s wall clock: a wedged package manager
+/// (a broken shim, a node runtime waiting on something) costs its
+/// provider, NEVER the daemon's startup.
 fn global_root(binary: &str, args: &[&str]) -> Option<PathBuf> {
-    let out = std::process::Command::new(binary)
+    use std::io::Read as _;
+    let mut child = std::process::Command::new(binary)
         .args(args)
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    if !out.status.success() {
-        return None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut out = String::new();
+                child.stdout.take()?.read_to_string(&mut out).ok()?;
+                let path = PathBuf::from(out.trim());
+                return path.is_dir().then_some(path);
+            }
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(_) => return None,
+        }
     }
-    let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    path.is_dir().then_some(path)
 }
 
 fn newest_dir(parent: &Path) -> Option<PathBuf> {
@@ -1254,6 +1276,8 @@ mod detector_tests {
         let mut overrides = BTreeMap::new();
         overrides.insert("npm".to_string(), npm.clone());
         overrides.insert("cargo".to_string(), tmp.path().join("absent"));
+        // Hermetic: pnpm would otherwise FORK the real tool.
+        overrides.insert("pnpm".to_string(), tmp.path().join("absent"));
         let roots = detect_roots(
             Some(tmp.path().join("nobrew").as_path()),
             Some(tmp.path().join("noapps").as_path()),
@@ -1271,10 +1295,15 @@ mod detector_tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let apps = tmp.path().join("Applications");
         std::fs::create_dir_all(&apps).unwrap();
+        // Hermetic: npm/pnpm defaults fork the REAL tools (a wedged
+        // shim once hung this very test for two hours).
+        let mut overrides = BTreeMap::new();
+        overrides.insert("npm".to_string(), tmp.path().join("absent"));
+        overrides.insert("pnpm".to_string(), tmp.path().join("absent"));
         let roots = detect_roots(
             Some(tmp.path().join("nobrew").as_path()),
             Some(&apps),
-            &BTreeMap::new(),
+            &overrides,
             tmp.path().join("home").as_path(),
         );
         let status = roots.status();

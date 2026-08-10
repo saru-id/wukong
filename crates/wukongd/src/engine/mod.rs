@@ -359,6 +359,7 @@ impl Engine {
         self.pkg_dirty = Some(now);
         self.settings_dirty = Some(now);
         self.check_store_integrity();
+        self.check_seal_health();
         // Other machines may have pushed to the shared lane; fold it
         // in (mirror only — live files change through `wukong sync`,
         // never behind the user's back) and reload the shared
