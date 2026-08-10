@@ -587,6 +587,14 @@ impl Engine {
             rel,
             &summary,
         );
+        // This content committed, so any still-open quarantine for the
+        // file describes a change that no longer exists (edited away,
+        // or reverted). Leaving it open invites approving a stale
+        // fingerprint.
+        soft(
+            self.db
+                .inbox_resolve_open(InboxKind::Quarantine, rel, Resolution::Skip),
+        );
         0
     }
 
@@ -948,6 +956,21 @@ impl Engine {
                     self.db
                         .record(EventKind::PushFailed, self.store.branch(), &err),
                 );
+                // A rejected shared push usually means another machine
+                // pushed first. Fold the remote in HERE, on the engine
+                // thread — the push task must never mutate the
+                // worktree while this thread can be committing to it —
+                // and stay dirty so the timer retries.
+                if self.remote_configured() {
+                    match self.store.refresh_shared() {
+                        Ok(true) => {
+                            self.reload_shared_manifests();
+                            self.dirty = true;
+                        }
+                        Ok(false) => {}
+                        Err(e) => soft(Err::<(), _>(e)),
+                    }
+                }
             }
         }
     }

@@ -1400,3 +1400,17 @@ fn health_alerts_on_stale_pushes_and_answers() {
     assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
     assert!(rig.engine.wants_push());
 }
+
+#[test]
+fn editing_the_secret_away_closes_the_stale_quarantine() {
+    let mut rig = rig();
+    let file = track(&mut rig, ".zshrc", "export A=1\n");
+    edit_and_settle(&mut rig, &file, &format!("export T={SECRET}\n"));
+    assert_eq!(rig.engine.db.inbox_count().unwrap(), 1);
+    // The user edits the secret out; the clean commit makes the held
+    // change moot — the item must not sit there inviting a stale
+    // approval.
+    edit_and_settle(&mut rig, &file, "export A=2\n");
+    assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
+    assert_eq!(store_content(&rig, &file).as_deref(), Some("export A=2\n"));
+}

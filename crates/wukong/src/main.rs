@@ -391,7 +391,10 @@ path (same as `wukong exclude`). skip sets it aside; it may return \
 when the file next changes.\n\n\
 Package or setting offer — approve adopts/records it. never means \
 never offered again. skip closes the item; it won't nag until reality \
-changes again."
+changes again.\n\n\
+Health notice (the governor reporting on itself) — approve runs the \
+obvious fix where one exists (a stuck push retries); skip dismisses \
+for a day."
     )]
     #[command(after_long_help = "EXAMPLES:\n  \
 wukong inbox                     find the item id\n  \

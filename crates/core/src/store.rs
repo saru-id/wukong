@@ -260,15 +260,12 @@ impl Store {
         Ok(true)
     }
 
-    /// Push, and when the shared branch moved under us (another
-    /// machine pushed first), fold the remote in and try once more.
+    /// Push the shared branch. Never mutates the worktree — when the
+    /// branch moved under us, the caller (on the engine thread, where
+    /// all worktree mutation lives) refreshes and retries; this task
+    /// may run concurrently with engine commits.
     pub fn push_shared(&self) -> Result<(), StoreError> {
-        let shared = self.shared();
-        if shared.push().is_ok() {
-            return Ok(());
-        }
-        self.refresh_shared()?;
-        shared.push()
+        self.shared().push()
     }
 
     #[must_use]
@@ -621,13 +618,17 @@ mod tests {
             b"from a\n"
         );
 
-        // Both edit the same shared file; B pushes first; A's push
-        // folds B in and A's content wins the conflict.
+        // Both edit the same shared file; B pushes first. A's push is
+        // REJECTED (push_shared never mutates the worktree — that is
+        // the engine thread's job); the refresh folds B in with A's
+        // content winning, and the retry lands.
         b.shared().mirror_in(&live, b"from b\n").unwrap();
         b.shared().commit(&rel, "shared: b").unwrap();
         b.push_shared().unwrap();
         a.shared().mirror_in(&live, b"from a2\n").unwrap();
         a.shared().commit(&rel, "shared: a2").unwrap();
+        assert!(a.push_shared().is_err(), "non-FF must reject, not fold");
+        assert!(a.refresh_shared().unwrap());
         a.push_shared().unwrap();
         assert_eq!(
             std::fs::read(a.shared().dir().join(&rel)).unwrap(),

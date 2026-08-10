@@ -1,7 +1,7 @@
-//! The dashboard: bare `wukong` lands here, inbox first. Four tabs
+//! The dashboard: bare `wukong` lands here, inbox first. Five tabs
 //! (Inbox, Files, Activity, Packages), number keys or h/l to move,
-//! j/k to walk a list, and on the inbox a/r/i to approve, redact, or
-//! ignore the selected item. It polls the daemon on a short cadence so
+//! j/k to walk a list, and on the inbox a/n/s to approve, never, or
+//! skip the selected item. It polls the daemon on a short cadence so
 //! a change committed while you watch shows up on its own.
 
 use crate::client;

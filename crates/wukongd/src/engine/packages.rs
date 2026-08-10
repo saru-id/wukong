@@ -154,8 +154,14 @@ impl Engine {
 
     fn offer_package_gone(&mut self, provider: Provider, name: &str) -> usize {
         let subject = pkg::subject(provider, name);
+        let lane_note = if self.shared_manifest.contains(provider, name) {
+            "\n\nNOTE: this is a SHARED entry — dropping it means EVERY machine \
+             stops wanting it."
+        } else {
+            ""
+        };
         let body = format!(
-            "{name} ({}) is in the manifest but no longer installed.\n\n\
+            "{name} ({}) is in the manifest but no longer installed.{lane_note}\n\n\
              approve — drop it from the manifest\n\
              skip    — keep it (pkg sync can reinstall it)",
             provider.as_str()
