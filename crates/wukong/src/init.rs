@@ -49,9 +49,10 @@ pub fn run(yes: bool) -> anyhow::Result<()> {
         // existing store. Clone, branch off, and offer the restore.
         match Store::clone_from(&config.remote, &store_dir, &config.machine) {
             Ok(store) => {
-                cloned_files = store.files().map_or(0, |f| f.len());
+                cloned_files = store.files().map_or(0, |f| f.len())
+                    + store.shared().files().map_or(0, |f| f.len());
                 println!(
-                    "✓ cloned store from {} (branch {}, {} file(s))",
+                    "✓ cloned store from {} (branch {}, {} file(s) incl. shared)",
                     config.remote, config.machine, cloned_files
                 );
             }

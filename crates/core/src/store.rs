@@ -42,6 +42,10 @@ const PUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 /// unique enough (test threads, a future multi-engine world).
 static SCRATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The branch every machine overlays: files, packages, and settings
+/// that should exist everywhere.
+pub const SHARED_BRANCH: &str = "shared";
+
 #[derive(Clone)]
 pub struct Store {
     dir: PathBuf,
@@ -70,6 +74,7 @@ impl Store {
         // never auto-gc, which could repack under a concurrent push.
         store.git(&["config", "commit.gpgsign", "false"])?;
         store.git(&["config", "gc.auto", "0"])?;
+        store.ensure_shared_worktree()?;
         // Sweep diff scratch files an earlier crash left behind: they
         // hold raw live content. Only STALE ones — a live diff (any
         // process; tests run many) finishes in milliseconds, so an
@@ -132,9 +137,138 @@ impl Store {
             let upstream = format!("origin/{machine}");
             store.git(&["checkout", "-q", "-B", machine, &upstream])?;
         } else {
-            store.git(&["checkout", "-q", "-B", machine])?;
+            // A brand-new machine starts EMPTY: its own files arrive
+            // via adopt, everyone's via the shared lane — never by
+            // inheriting whichever branch the clone's HEAD pointed at
+            // (that would shadow the shared lane forever, since the
+            // machine branch always wins).
+            let tree = store.git_stdin_empty(&["mktree"])?;
+            let commit = store.git(&["commit-tree", &tree, "-m", "machine root"])?;
+            store.git(&["checkout", "-q", "-B", machine, &commit])?;
         }
         Ok(store)
+    }
+
+    /// The shared lane as a full Store: same repo, the `shared`
+    /// branch, checked out in its own worktree — every method works
+    /// on it unchanged (commit, log, push, files, diff).
+    #[must_use]
+    pub fn shared(&self) -> Store {
+        Store {
+            dir: self.shared_worktree_dir(),
+            branch: SHARED_BRANCH.to_string(),
+        }
+    }
+
+    /// Always a sibling of the store dir — never a global path, so
+    /// sandboxed stores get sandboxed shared worktrees.
+    fn shared_worktree_dir(&self) -> PathBuf {
+        self.dir
+            .parent()
+            .map_or_else(|| self.dir.join("shared"), |p| p.join("shared"))
+    }
+
+    /// Make the `shared` branch and its worktree exist. A fresh store
+    /// gets an EMPTY shared root (never seeded from a machine branch —
+    /// shared means chosen, not inherited); a cloned store picks up
+    /// origin/shared.
+    fn ensure_shared_worktree(&self) -> Result<(), StoreError> {
+        if self.branch == SHARED_BRANCH {
+            return Ok(());
+        }
+        let shared_ref = format!("refs/heads/{SHARED_BRANCH}");
+        if self
+            .git(&["show-ref", "--verify", "--quiet", &shared_ref])
+            .is_err()
+        {
+            let origin_ref = format!("refs/remotes/origin/{SHARED_BRANCH}");
+            if self
+                .git(&["show-ref", "--verify", "--quiet", &origin_ref])
+                .is_ok()
+            {
+                self.git(&["branch", SHARED_BRANCH, &format!("origin/{SHARED_BRANCH}")])?;
+            } else {
+                // An empty orphan root: plumbing, so it works on any
+                // git and never touches the machine checkout.
+                let tree = self.git_stdin_empty(&["mktree"])?;
+                let commit = self.git(&["commit-tree", &tree, "-m", "shared lane"])?;
+                self.git(&["branch", SHARED_BRANCH, &commit])?;
+            }
+        }
+        let worktree = self.shared_worktree_dir();
+        if !worktree.join(".git").exists() {
+            self.git(&[
+                "worktree",
+                "add",
+                &worktree.to_string_lossy(),
+                SHARED_BRANCH,
+            ])?;
+        }
+        Ok(())
+    }
+
+    /// A git call that must read EOF on stdin (mktree with no input =
+    /// the empty tree, in whatever hash the repo speaks).
+    fn git_stdin_empty(&self, args: &[&str]) -> Result<String, StoreError> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.dir)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .map_err(|source| StoreError::Io {
+                path: self.dir.clone(),
+                source,
+            })?;
+        if !out.status.success() {
+            return Err(StoreError::Git {
+                args: redact_userinfo(&args.join(" ")),
+                stderr: redact_userinfo(String::from_utf8_lossy(&out.stderr).trim()),
+            });
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    /// Fetch the shared branch and fold in what other machines pushed.
+    /// Local commits rebase on top, and where the SAME file changed on
+    /// both sides the LOCAL content wins — live files win, always.
+    /// Returns true when remote commits arrived.
+    pub fn refresh_shared(&self) -> Result<bool, StoreError> {
+        let shared = self.shared();
+        if shared
+            .git(&["fetch", "-q", "origin", SHARED_BRANCH])
+            .is_err()
+        {
+            // Remote unreachable or branch not there yet — not news.
+            return Ok(false);
+        }
+        let behind: usize = shared
+            .git(&[
+                "rev-list",
+                "--count",
+                &format!("{SHARED_BRANCH}..origin/{SHARED_BRANCH}"),
+            ])?
+            .parse()
+            .unwrap_or(0);
+        if behind == 0 {
+            return Ok(false);
+        }
+        // In a rebase, "theirs" is the commit being replayed — ours,
+        // in the human sense. Local wins.
+        shared.git(&["rebase", "-X", "theirs", &format!("origin/{SHARED_BRANCH}")])?;
+        Ok(true)
+    }
+
+    /// Push, and when the shared branch moved under us (another
+    /// machine pushed first), fold the remote in and try once more.
+    pub fn push_shared(&self) -> Result<(), StoreError> {
+        let shared = self.shared();
+        if shared.push().is_ok() {
+            return Ok(());
+        }
+        self.refresh_shared()?;
+        shared.push()
     }
 
     #[must_use]
@@ -383,6 +517,92 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_lane_is_a_sibling_worktree_with_empty_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = Store::open(&tmp.path().join("store"), "testbox").unwrap();
+        let shared = store.shared();
+        assert_eq!(shared.branch(), SHARED_BRANCH);
+        assert!(shared.dir().join(".git").exists(), "worktree missing");
+        // Shared starts EMPTY — never seeded from a machine branch.
+        assert_eq!(shared.files().unwrap().len(), 0);
+
+        // Commits land on the shared branch without touching machine.
+        let live = paths::home().join(".wukong-test-shared");
+        let rel = shared.mirror_in(&live, b"shared everywhere\n").unwrap();
+        assert!(shared.commit(&rel, "shared: initial").unwrap().is_some());
+        assert_eq!(shared.files().unwrap().len(), 1);
+        assert_eq!(store.files().unwrap().len(), 0);
+
+        // Reopening is idempotent (worktree already there).
+        let again = Store::open(&tmp.path().join("store"), "testbox").unwrap();
+        assert_eq!(again.shared().files().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn shared_lane_syncs_between_machines_local_wins() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let remote = tmp.path().join("remote.git");
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {args:?}"
+            );
+        };
+        git(&[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            remote.to_str().unwrap(),
+        ]);
+        let url = remote.to_string_lossy().into_owned();
+
+        let a = Store::open(&tmp.path().join("a/store"), "machine-a").unwrap();
+        a.ensure_remote(&url).unwrap();
+        let live = paths::home().join(".wukong-test-shared-sync");
+        let rel = a.shared().mirror_in(&live, b"from a\n").unwrap();
+        a.shared().commit(&rel, "shared: a").unwrap();
+        a.push_shared().unwrap();
+
+        // Machine B clones: its own branch starts EMPTY (files come
+        // from adopt or the shared lane), and A's shared file is there.
+        let b = Store::clone_from(&url, &tmp.path().join("b/store"), "machine-b").unwrap();
+        assert_eq!(b.files().unwrap().len(), 0);
+        assert_eq!(
+            std::fs::read(b.shared().dir().join(&rel)).unwrap(),
+            b"from a\n"
+        );
+
+        // Both edit the same shared file; B pushes first; A's push
+        // folds B in and A's content wins the conflict.
+        b.shared().mirror_in(&live, b"from b\n").unwrap();
+        b.shared().commit(&rel, "shared: b").unwrap();
+        b.push_shared().unwrap();
+        a.shared().mirror_in(&live, b"from a2\n").unwrap();
+        a.shared().commit(&rel, "shared: a2").unwrap();
+        a.push_shared().unwrap();
+        assert_eq!(
+            std::fs::read(a.shared().dir().join(&rel)).unwrap(),
+            b"from a2\n"
+        );
+
+        // B refreshes and receives A's winning content.
+        assert!(b.refresh_shared().unwrap());
+        assert_eq!(
+            std::fs::read(b.shared().dir().join(&rel)).unwrap(),
+            b"from a2\n"
+        );
+        // Quiet when nothing new arrived.
+        assert!(!b.refresh_shared().unwrap());
+    }
 
     #[test]
     fn mirror_commit_cycle() {

@@ -36,6 +36,8 @@ pub enum EventKind {
     SettingIgnored,
     Sealed,
     Unsealed,
+    /// A lane move, or shared updates arriving from another machine.
+    Shared,
 }
 
 impl EventKind {
@@ -61,6 +63,7 @@ impl EventKind {
             Self::SettingRecorded => "setting-recorded",
             Self::SettingIgnored => "setting-ignored",
             Self::Sealed => "sealed",
+            Self::Shared => "shared",
             Self::Unsealed => "unsealed",
         }
     }
@@ -96,14 +99,14 @@ pub enum InboxKind {
     Quarantine,
     /// An untracked sentinel changed — track it?
     Sentinel,
-    /// A package appeared outside wukong — adopt it? (`ignore` on
-    /// package items is PERMANENT: it lands on the manifest's ignore
-    /// list and the package is never offered again.)
+    /// A package appeared outside wukong — adopt it? (`never` lands
+    /// on the manifest's ignore list; the package is never offered
+    /// again.)
     Package,
     /// A manifest package vanished outside wukong — drop it?
     PackageGone,
-    /// A governed setting changed — record the new value? (`ignore` is
-    /// PERMANENT: the key joins the manifest's ignore list.)
+    /// A governed setting changed — record the new value? (`never`
+    /// puts the key on the manifest's ignore list.)
     Setting,
 }
 

@@ -66,6 +66,9 @@ pub struct Engine {
     tracked_live: HashSet<PathBuf>,
     /// The subset stored as age ciphertext.
     sealed_live: HashSet<PathBuf>,
+    /// The subset living in the shared lane — mirrored on the `shared`
+    /// branch every machine overlays.
+    shared_files: HashSet<PathBuf>,
     /// The public recipient every sealed commit encrypts to, loaded
     /// from the store (created on first seal).
     recipient: Option<String>,
@@ -75,6 +78,8 @@ pub struct Engine {
     /// Package governance: the synced manifest, where the detectors
     /// look, and a debounce mark for the next reconcile.
     manifest: Manifest,
+    /// The shared lane's manifest: packages every machine wants.
+    shared_manifest: Manifest,
     pkg_roots: Roots,
     pkg_watch: Vec<(PathBuf, bool)>,
     pkg_dirty: Option<Instant>,
@@ -87,6 +92,9 @@ pub struct Engine {
     /// Settings governance: desired state, where preferences live
     /// (None = disabled), and the reconcile debounce mark.
     settings_manifest: wukong_core::settings::SettingsManifest,
+    /// Settings every machine wants; this machine's manifest wins
+    /// per key.
+    shared_settings: wukong_core::settings::SettingsManifest,
     settings_poisoned: bool,
     prefs_dir: Option<PathBuf>,
     settings_dirty: Option<Instant>,
@@ -95,19 +103,39 @@ pub struct Engine {
     capture: Option<(Instant, PrefsSnapshot)>,
 }
 
-/// The tracked roster and its sealed subset, as canonical live paths.
-fn roster(db: &Db) -> anyhow::Result<(HashSet<PathBuf>, HashSet<PathBuf>)> {
+/// The tracked roster and its sealed and shared subsets, as canonical
+/// live paths.
+type Roster = (HashSet<PathBuf>, HashSet<PathBuf>, HashSet<PathBuf>);
+fn roster(db: &Db) -> anyhow::Result<Roster> {
     let rows = db.tracked()?;
     let tracked = rows
         .iter()
-        .map(|(rel, _)| paths::from_store_rel(Path::new(rel)))
+        .map(|(rel, _, _)| paths::from_store_rel(Path::new(rel)))
         .collect();
     let sealed = rows
         .iter()
-        .filter(|(_, sealed)| *sealed)
-        .map(|(rel, _)| paths::from_store_rel(Path::new(rel)))
+        .filter(|(_, sealed, _)| *sealed)
+        .map(|(rel, _, _)| paths::from_store_rel(Path::new(rel)))
         .collect();
-    Ok((tracked, sealed))
+    let shared = rows
+        .iter()
+        .filter(|(_, _, shared)| *shared)
+        .map(|(rel, _, _)| paths::from_store_rel(Path::new(rel)))
+        .collect();
+    Ok((tracked, sealed, shared))
+}
+
+/// The shared lane's package and settings manifests, from its
+/// worktree. Unreadable manifests read as empty — the shared lane
+/// must never take the daemon down.
+fn load_shared_manifests(store: &Store) -> (Manifest, wukong_core::settings::SettingsManifest) {
+    let dir = store.shared().dir().to_path_buf();
+    (
+        Manifest::load(&dir).unwrap_or_default().unwrap_or_default(),
+        wukong_core::settings::SettingsManifest::load(&dir)
+            .unwrap_or_default()
+            .unwrap_or_default(),
+    )
 }
 
 /// Every (domain, key) → scalar value at one moment in time.
@@ -122,7 +150,7 @@ impl Engine {
             store.ensure_remote(&config.remote)?;
         }
         db.record(EventKind::DaemonStarted, &config.machine, "")?;
-        let (tracked_live, sealed_live) = roster(&db)?;
+        let (tracked_live, sealed_live, shared_files) = roster(&db)?;
         let recipient = std::fs::read_to_string(store.dir().join(wukong_core::seal::RECIPIENT_REL))
             .ok()
             .map(|s| s.trim().to_string());
@@ -176,7 +204,9 @@ impl Engine {
         // never fired before shutdown); derive dirtiness from git, not
         // from a fresh bool, or they'd sit local until the next edit.
         let remote_configured = !config.remote.is_empty();
-        let unpushed = store.unpushed(remote_configured);
+        let unpushed =
+            store.unpushed(remote_configured) + store.shared().unpushed(remote_configured);
+        let (shared_manifest, shared_settings) = load_shared_manifests(&store);
         Ok(Self {
             dirty: remote_configured && unpushed > 0,
             unpushed,
@@ -194,11 +224,14 @@ impl Engine {
             watch_requests: Vec::new(),
             tracked_live,
             sealed_live,
+            shared_files,
             recipient,
             sentinel_files,
             sentinel_dirs,
             excludes,
             manifest,
+            shared_manifest,
+            shared_settings,
             pkg_roots,
             pkg_watch,
             pkg_dirty: None,
@@ -321,6 +354,38 @@ impl Engine {
         self.redetect_roots();
         self.pkg_dirty = Some(now);
         self.settings_dirty = Some(now);
+        // Other machines may have pushed to the shared lane; fold it
+        // in (mirror only — live files change through `wukong sync`,
+        // never behind the user's back) and reload the shared
+        // manifests it may have replaced.
+        if self.remote_configured() {
+            match self.store.refresh_shared() {
+                Ok(true) => {
+                    self.reload_shared_manifests();
+                    soft(self.db.record(
+                        EventKind::Shared,
+                        "shared",
+                        "updates from another machine — `wukong sync` applies them",
+                    ));
+                }
+                Ok(false) => {}
+                Err(e) => soft(Err::<(), _>(e)),
+            }
+        }
+    }
+
+    /// Re-read the shared package and settings manifests after the
+    /// shared branch moved.
+    fn reload_shared_manifests(&mut self) {
+        let dir = self.store.shared().dir().to_path_buf();
+        match Manifest::load(&dir) {
+            Ok(m) => self.shared_manifest = m.unwrap_or_default(),
+            Err(e) => soft(Err::<(), _>(e)),
+        }
+        match wukong_core::settings::SettingsManifest::load(&dir) {
+            Ok(m) => self.shared_settings = m.unwrap_or_default(),
+            Err(e) => soft(Err::<(), _>(e)),
+        }
     }
 
     fn under_sentinel(&self, path: &Path) -> bool {
@@ -365,6 +430,47 @@ impl Engine {
         }
     }
 
+    /// The store a live file's mirror belongs to — a cheap clone, so
+    /// callers keep exclusive access to the engine.
+    fn lane(&self, live: &Path) -> Store {
+        if self.shared_files.contains(live) {
+            self.store.shared()
+        } else {
+            self.store.clone()
+        }
+    }
+
+    /// Read a tracked live file for committing. `None` means the read
+    /// itself concluded the flow: a true deletion commits the removal;
+    /// unreadability and the size cap are recorded, never guessed at.
+    fn read_for_commit(&mut self, path: &Path, rel: &str) -> Option<Vec<u8>> {
+        match std::fs::read(path) {
+            Ok(b) if b.len() > MAX_TRACKED_BYTES => {
+                soft(Err::<(), _>(format!(
+                    "{rel}: {} bytes exceeds the {MAX_TRACKED_BYTES}-byte tracked-file cap — not committed",
+                    b.len()
+                )));
+                None
+            }
+            Ok(b) => Some(b),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Actually deleted: drop it from the mirror and commit
+                // the removal.
+                let lane = self.lane(path);
+                soft(lane.remove(path));
+                let rel_path = paths::store_rel(path);
+                self.commit_in(&lane, &rel_path, &format!("{rel}: removed"), rel, "removed");
+                None
+            }
+            Err(e) => {
+                // EACCES, EIO, EMFILE… are NOT deletions. Removing the
+                // mirror here would commit a phantom delete.
+                soft(Err::<(), _>(format!("read {rel}: {e}")));
+                None
+            }
+        }
+    }
+
     /// The gated commit flow for a tracked file:
     ///
     /// 1. scan — every finding, every line
@@ -374,30 +480,9 @@ impl Engine {
     /// 4. paranoia: the to-be-stored content is re-scanned; anything
     ///    unexpected holds the commit rather than trusting the mask
     fn commit_tracked(&mut self, path: &Path, rel: &str) -> usize {
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Actually deleted: drop it from the mirror and commit
-                // the removal.
-                soft(self.store.remove(path));
-                let rel_path = paths::store_rel(path);
-                self.commit_scoped(&rel_path, &format!("{rel}: removed"), rel, "removed");
-                return 0;
-            }
-            Err(e) => {
-                // EACCES, EIO, EMFILE… are NOT deletions. Removing the
-                // mirror here would commit a phantom delete.
-                soft(Err::<(), _>(format!("read {rel}: {e}")));
-                return 0;
-            }
-        };
-        if bytes.len() > MAX_TRACKED_BYTES {
-            soft(Err::<(), _>(format!(
-                "{rel}: {} bytes exceeds the {MAX_TRACKED_BYTES}-byte tracked-file cap — not committed",
-                bytes.len()
-            )));
+        let Some(bytes) = self.read_for_commit(path, rel) else {
             return 0;
-        }
+        };
         if self.sealed_live.contains(path) {
             return self.commit_sealed(path, rel, &bytes);
         }
@@ -475,27 +560,48 @@ impl Engine {
         // Summary must be computed against the OLD stored copy, so it
         // runs before mirror_in overwrites it.
         let stored_text = String::from_utf8_lossy(&stored).into_owned();
-        let mut summary = change_summary(&self.store, path, &stored_text);
+        let lane = self.lane(path);
+        let mut summary = change_summary(&lane, path, &stored_text);
         // Audit trail: allow-marked lines carry exempted secrets.
         let allowed = gate::allow_marker_count(content);
         if allowed > 0 {
             let _ = write!(summary, " ({allowed} allow-marked)");
         }
-        let rel_path = match self.store.mirror_in(path, &stored) {
+        let rel_path = match lane.mirror_in(path, &stored) {
             Ok(rel_path) => rel_path,
             Err(e) => {
                 soft(Err::<(), _>(e));
                 return 0;
             }
         };
-        self.commit_scoped(&rel_path, &format!("{rel}: {summary}"), rel, &summary);
+        self.commit_in(
+            &lane,
+            &rel_path,
+            &format!("{rel}: {summary}"),
+            rel,
+            &summary,
+        );
         0
     }
 
     /// Commit one path and record the outcome — failures included,
     /// loudly: a commit that silently doesn't happen is drift.
     fn commit_scoped(&mut self, rel_path: &Path, message: &str, rel: &str, summary: &str) {
-        match self.store.commit(rel_path, message) {
+        let store = self.store.clone();
+        self.commit_in(&store, rel_path, message, rel, summary);
+    }
+
+    /// The lane-aware commit: same bookkeeping whichever branch takes
+    /// the commit.
+    fn commit_in(
+        &mut self,
+        store: &Store,
+        rel_path: &Path,
+        message: &str,
+        rel: &str,
+        summary: &str,
+    ) {
+        match store.commit(rel_path, message) {
             Ok(Some(sha)) => self.after_commit(rel, &sha, summary),
             Ok(None) => {}
             Err(e) => {
@@ -527,9 +633,16 @@ impl Engine {
                 return 0;
             }
         };
-        match self.store.mirror_in(path, &sealed) {
+        let lane = self.lane(path);
+        match lane.mirror_in(path, &sealed) {
             Ok(rel_path) => {
-                self.commit_scoped(&rel_path, &format!("{rel}: sealed update"), rel, "sealed");
+                self.commit_in(
+                    &lane,
+                    &rel_path,
+                    &format!("{rel}: sealed update"),
+                    rel,
+                    "sealed",
+                );
                 soft(self.db.set_content_hash(rel, &hash));
             }
             Err(e) => soft(Err::<(), _>(e)),
@@ -590,6 +703,82 @@ impl Engine {
         }
     }
 
+    /// Move a tracked file between the machine and shared lanes: the
+    /// stored bytes move as-is (ciphertext stays ciphertext), each
+    /// lane commits its half of the move, and the roster follows.
+    fn share(&mut self, path: &str, undo: bool) -> Response {
+        let live = paths::resolve_input(path);
+        if !self.tracked_live.contains(&live) {
+            return Response::Error {
+                message: format!(
+                    "{} is not tracked — `wukong track --shared` does both at once",
+                    paths::display(&live)
+                ),
+            };
+        }
+        if self.shared_files.contains(&live) != undo {
+            return Response::Ok {
+                message: format!(
+                    "{} is already in the {} lane",
+                    paths::display(&live),
+                    if undo { "machine" } else { "shared" }
+                ),
+            };
+        }
+        let rel_path = paths::store_rel(&live);
+        let rel = rel_path.to_string_lossy().into_owned();
+        let (from, to) = if undo {
+            (self.store.shared(), self.store.clone())
+        } else {
+            (self.store.clone(), self.store.shared())
+        };
+        let bytes = match std::fs::read(from.dir().join(&rel_path)) {
+            Ok(b) => b,
+            Err(e) => {
+                return Response::Error {
+                    message: format!("no stored copy to move: {e}"),
+                };
+            }
+        };
+        if let Err(e) = to.mirror_in(&live, &bytes) {
+            return err(e);
+        }
+        let lane_name = if undo { "machine" } else { "shared" };
+        self.commit_in(
+            &to,
+            &rel_path,
+            &format!("{rel}: joins the {lane_name} lane"),
+            &rel,
+            "lane change",
+        );
+        soft(from.remove(&live));
+        self.commit_in(
+            &from,
+            &rel_path,
+            &format!("{rel}: moved to the {lane_name} lane"),
+            &rel,
+            "lane change",
+        );
+        soft(self.db.set_shared(&rel, !undo));
+        if undo {
+            self.shared_files.remove(&live);
+        } else {
+            self.shared_files.insert(live.clone());
+        }
+        soft(self.db.record(EventKind::Shared, &rel, lane_name));
+        let mut message = format!(
+            "{} now syncs to the {lane_name} lane",
+            paths::display(&live)
+        );
+        if !undo && self.sealed_live.contains(&live) {
+            message.push_str(
+                "\nnote: it is sealed — every machine needs this store's seal identity \
+                 (`wukong seal-key export` / `import`)",
+            );
+        }
+        Response::Ok { message }
+    }
+
     /// Convert a tracked file to the sealed lane and commit ciphertext.
     fn seal(&mut self, path: &str) -> Response {
         let live = paths::resolve_input(path);
@@ -642,7 +831,7 @@ impl Engine {
     }
 
     fn quarantine(&mut self, path: &Path, rel: &str, content: &str, new: &[&Finding]) -> usize {
-        let diff = self.store.diff_against_live(path, content);
+        let diff = self.lane(path).diff_against_live(path, content);
         let body = quarantine_body(new, &diff);
         // A pathological file can carry thousands of findings; the row
         // must stay bounded.
@@ -743,7 +932,8 @@ impl Engine {
                 // Only clean if nothing landed while the push ran — a
                 // commit made mid-push is NOT on the remote yet.
                 self.dirty = self.commits != self.push_snapshot;
-                self.unpushed = self.store.unpushed(self.remote_configured());
+                self.unpushed = self.store.unpushed(self.remote_configured())
+                    + self.store.shared().unpushed(self.remote_configured());
                 soft(self.db.record(EventKind::Pushed, self.store.branch(), ""));
                 soft(self.db.prune_events());
             }
@@ -765,7 +955,18 @@ impl Engine {
                 daemon_version: env!("CARGO_PKG_VERSION").to_string(),
             },
             Request::Status => self.status(),
-            Request::Track { path, sealed } => self.track(&path, sealed),
+            Request::Track {
+                path,
+                sealed,
+                shared,
+            } => self.track(&path, sealed, shared),
+            Request::Share { path, undo } => self.share(&path, undo),
+            Request::PkgShare {
+                provider,
+                name,
+                undo,
+            } => self.pkg_share(provider, &name, undo),
+            Request::SettingShare { domain, key, undo } => self.setting_share(&domain, &key, undo),
             Request::Untrack { path } => self.untrack(&path),
             Request::TrackedList => self.tracked_list(),
             Request::InboxList => match self.db.inbox_open() {
@@ -792,8 +993,9 @@ impl Engine {
                 provider,
                 name,
                 remove,
+                shared,
                 observe_only,
-            } => self.pkg_record(provider, &name, remove, observe_only),
+            } => self.pkg_record(provider, &name, remove, shared, observe_only),
             Request::PkgList => self.pkg_list(),
             Request::PkgProviders => self.pkg_providers(),
             Request::PkgIgnore {
@@ -843,7 +1045,7 @@ impl Engine {
     /// Track a live path: resolve it, refuse forbidden files (unless
     /// sealed — ciphertext-only storage is exactly what makes a
     /// forbidden name safe to govern), mirror and commit immediately.
-    fn track(&mut self, path: &str, sealed: bool) -> Response {
+    fn track(&mut self, path: &str, sealed: bool, shared: bool) -> Response {
         let live = paths::resolve_input(path);
         if !live.is_file() {
             return Response::Error {
@@ -887,6 +1089,10 @@ impl Engine {
                 if sealed {
                     self.sealed_live.insert(live.clone());
                 }
+                if shared {
+                    soft(self.db.set_shared(&rel, true));
+                    self.shared_files.insert(live.clone());
+                }
                 self.adopt(&live);
                 // Commit whatever is clean now; a quarantine lands in
                 // the inbox but the file stays tracked.
@@ -913,11 +1119,19 @@ impl Engine {
         let rel = paths::store_rel(&live).to_string_lossy().into_owned();
         match self.db.untrack(&rel) {
             Ok(true) => {
+                let lane = self.lane(&live);
                 self.tracked_live.remove(&live);
                 self.sealed_live.remove(&live);
-                soft(self.store.remove(&live));
+                self.shared_files.remove(&live);
+                soft(lane.remove(&live));
                 let rel_path = paths::store_rel(&live);
-                self.commit_scoped(&rel_path, &format!("{rel}: untracked"), &rel, "untracked");
+                self.commit_in(
+                    &lane,
+                    &rel_path,
+                    &format!("{rel}: untracked"),
+                    &rel,
+                    "untracked",
+                );
                 soft(self.db.record(EventKind::Untracked, &rel, ""));
                 Response::Ok {
                     message: format!("stopped tracking {}", paths::display(&live)),
@@ -935,12 +1149,13 @@ impl Engine {
             Ok(rows) => Response::Tracked {
                 files: rows
                     .into_iter()
-                    .map(|(rel, sealed)| {
+                    .map(|(rel, sealed, shared)| {
                         let live = paths::from_store_rel(Path::new(&rel));
                         TrackedFile {
                             display: paths::display(&live),
                             exists: live.exists(),
                             sealed,
+                            shared,
                             path: rel,
                         }
                     })
@@ -1166,17 +1381,17 @@ skip keeps the change out of git"
     /// create, what it would refuse to overwrite, what already
     /// matches. Reads everything, writes nothing.
     fn restore_plan(&self) -> Response {
-        let rels = match self.store.files() {
-            Ok(files) => files,
+        let sources = match self.restore_sources() {
+            Ok(sources) => sources,
             Err(e) => return err(e),
         };
         let (mut create, mut in_sync) = (0usize, 0usize);
         let mut held = Vec::new();
-        for rel in rels {
+        for (rel, lane) in sources {
             if rel.starts_with("__wukong__") {
                 continue;
             }
-            let Ok(stored) = std::fs::read(self.store.dir().join(&rel)) else {
+            let Ok(stored) = std::fs::read(lane.dir().join(&rel)) else {
                 continue;
             };
             let live = paths::from_store_rel(&rel);
@@ -1207,28 +1422,56 @@ skip keeps the change out of git"
         Response::Ok { message }
     }
 
+    /// Every restorable (rel, lane) pair: the machine branch, then
+    /// shared files the machine branch doesn't shadow.
+    fn restore_sources(&self) -> Result<Vec<(PathBuf, Store)>, wukong_core::store::StoreError> {
+        let machine: Vec<PathBuf> = self.store.files()?;
+        let covered: HashSet<PathBuf> = machine.iter().cloned().collect();
+        let shared = self.store.shared();
+        let mut out: Vec<(PathBuf, Store)> = machine
+            .into_iter()
+            .map(|rel| (rel, self.store.clone()))
+            .collect();
+        for rel in shared.files()? {
+            if !covered.contains(&rel) {
+                out.push((rel, shared.clone()));
+            }
+        }
+        Ok(out)
+    }
+
     fn restore(&mut self, path: Option<&str>, force: bool) -> Response {
-        let rels: Vec<PathBuf> = match path {
-            Some(p) => vec![paths::store_rel(&paths::resolve_input(p))],
-            None => match self.store.files() {
-                Ok(files) => files,
+        let sources: Vec<(PathBuf, Store)> = match path {
+            Some(p) => {
+                let rel = paths::store_rel(&paths::resolve_input(p));
+                // A single file restores from whichever lane holds it;
+                // the machine branch shadows shared.
+                let lane = if self.store.dir().join(&rel).is_file() {
+                    self.store.clone()
+                } else {
+                    self.store.shared()
+                };
+                vec![(rel, lane)]
+            }
+            None => match self.restore_sources() {
+                Ok(sources) => sources,
                 Err(e) => return err(e),
             },
         };
-        if rels.is_empty() {
+        if sources.is_empty() {
             return Response::Error {
                 message: "the store has no files to restore".to_string(),
             };
         }
         let (mut restored, mut skipped) = (0usize, Vec::new());
-        for rel in rels {
+        for (rel, lane) in sources {
             // wukong's own artifacts (the manifest) are store state,
             // not live files — never "restore" them into $HOME.
             if rel.starts_with("__wukong__") {
                 continue;
             }
             let rel_str = rel.to_string_lossy().into_owned();
-            let Ok(mut stored) = std::fs::read(self.store.dir().join(&rel)) else {
+            let Ok(mut stored) = std::fs::read(lane.dir().join(&rel)) else {
                 skipped.push(format!("{rel_str} (not in store)"));
                 continue;
             };
@@ -1270,11 +1513,15 @@ skip keeps the change out of git"
                 continue;
             }
             let was_sealed = wukong_core::seal::is_sealed(
-                &std::fs::read(self.store.dir().join(&rel)).unwrap_or_default(),
+                &std::fs::read(lane.dir().join(&rel)).unwrap_or_default(),
             );
             soft(self.db.track(&rel_str, was_sealed));
             if was_sealed {
                 self.sealed_live.insert(live.clone());
+            }
+            if lane.branch() == wukong_core::store::SHARED_BRANCH {
+                soft(self.db.set_shared(&rel_str, true));
+                self.shared_files.insert(live.clone());
             }
             self.adopt(&live);
             soft(self.db.record(EventKind::Restored, &rel_str, ""));

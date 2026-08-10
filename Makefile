@@ -15,6 +15,7 @@ drill:
 	bash drills/dotfiles.sh
 	bash drills/packages.sh
 	bash drills/settings.sh
+	bash drills/shared.sh
 
 audit:
 	cargo audit

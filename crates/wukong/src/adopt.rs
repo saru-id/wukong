@@ -81,6 +81,7 @@ pub fn run(yes: bool) -> anyhow::Result<()> {
         match client::call(Request::Track {
             path: f.clone(),
             sealed: false,
+            shared: false,
         })? {
             Response::Ok { message } => println!("{message}"),
             Response::Error { message } => eprintln!("  skipped: {message}"),

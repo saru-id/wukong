@@ -122,6 +122,13 @@ pub fn store_dir() -> PathBuf {
     data_dir().join("store")
 }
 
+/// The shared lane's worktree: the same repo as the store, checked
+/// out on the `shared` branch every machine overlays.
+#[must_use]
+pub fn shared_dir() -> PathBuf {
+    data_dir().join("shared")
+}
+
 #[must_use]
 pub fn db_file() -> PathBuf {
     data_dir().join("wukong.db")

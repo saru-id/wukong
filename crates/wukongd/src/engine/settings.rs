@@ -47,7 +47,8 @@ impl Engine {
         if self.settings_poisoned {
             return 0;
         }
-        let wanted = self.settings_manifest.governed_keys();
+        let mut wanted = self.settings_manifest.governed_keys();
+        wanted.extend(self.shared_settings.governed_keys());
         let current = settings::read_current(&prefs_dir, &wanted);
         let state = match self.db.settings_state() {
             Ok(state) => state,
@@ -73,10 +74,9 @@ impl Engine {
             }
             soft(self.db.settings_state_set(domain, key, &live_json));
             if baseline
-                || self.settings_manifest.ignored(domain, key)
+                || self.setting_ignored(domain, key)
                 || self
-                    .settings_manifest
-                    .desired(domain, key)
+                    .desired_setting(domain, key)
                     .is_some_and(|want| want.matches(live))
             {
                 // Returning to the desired value (a sync landing, a
@@ -113,7 +113,8 @@ impl Engine {
         let body = format!(
             "{label}\n{domain} {key}: {from} → {live}\n\n\
              approve — record {live} as this machine's desired value\n\
-             ignore  — never ask about this setting again"
+             never   — don't ask about this setting again\n\
+             skip    — not now"
         );
         let meta = serde_json::to_string(&SettingMeta {
             domain: domain.to_string(),
@@ -256,13 +257,14 @@ impl Engine {
                 message: "settings governance is disabled in config".to_string(),
             };
         };
-        let wanted = self.settings_manifest.governed_keys();
+        let mut wanted = self.settings_manifest.governed_keys();
+        wanted.extend(self.shared_settings.governed_keys());
         let current = settings::read_current(&prefs_dir, &wanted);
         let entries = wanted
             .into_iter()
             .map(|(domain, key)| {
                 let known = settings::known(&domain, &key);
-                let desired = self.settings_manifest.desired(&domain, &key).cloned();
+                let desired = self.desired_setting(&domain, &key).cloned();
                 let live = current.get(&(domain.clone(), key.clone())).cloned();
                 let in_sync = match (&desired, &live) {
                     (Some(want), Some(is)) => want.matches(is),
@@ -348,6 +350,83 @@ impl Engine {
             Response::Ok {
                 message: format!("{subject} will never be offered again"),
             }
+        }
+    }
+
+    /// This machine's manifest wins per key; the shared lane fills
+    /// the rest.
+    fn desired_setting(&self, domain: &str, key: &str) -> Option<&Value> {
+        self.settings_manifest
+            .desired(domain, key)
+            .or_else(|| self.shared_settings.desired(domain, key))
+    }
+
+    fn setting_ignored(&self, domain: &str, key: &str) -> bool {
+        self.settings_manifest.ignored(domain, key) || self.shared_settings.ignored(domain, key)
+    }
+
+    /// Move a recorded setting between the machine and shared lanes.
+    pub(super) fn setting_share(&mut self, domain: &str, key: &str, undo: bool) -> Response {
+        let subject = format!("{domain} {key}");
+        if undo {
+            let Some(value) = self.shared_settings.desired(domain, key).cloned() else {
+                return Response::Error {
+                    message: format!("{subject} is not in the shared lane"),
+                };
+            };
+            self.shared_settings.remove(domain, key);
+            self.settings_manifest.set(domain, key, value);
+            self.commit_settings_manifest(&format!("{subject} joins the machine lane"));
+            self.commit_shared_settings(&format!("{subject} moved to the machine lane"));
+        } else {
+            let Some(value) = self.settings_manifest.desired(domain, key).cloned() else {
+                return Response::Error {
+                    message: format!(
+                        "{subject} has no recorded value on this machine — record it first"
+                    ),
+                };
+            };
+            self.settings_manifest.remove(domain, key);
+            self.shared_settings.set(domain, key, value);
+            self.commit_shared_settings(&format!("{subject} joins the shared lane"));
+            self.commit_settings_manifest(&format!("{subject} moved to the shared lane"));
+        }
+        soft(self.db.record(
+            EventKind::Shared,
+            &subject,
+            if undo { "machine lane" } else { "shared lane" },
+        ));
+        Response::Ok {
+            message: format!(
+                "{subject} now syncs to the {} lane",
+                if undo { "machine" } else { "shared" }
+            ),
+        }
+    }
+
+    /// The shared twin of `commit_settings_manifest`.
+    fn commit_shared_settings(&mut self, summary: &str) {
+        let shared = self.store.shared();
+        soft(self.shared_settings.save(shared.dir()));
+        let store = shared;
+        match store.commit(
+            std::path::Path::new(settings::MANIFEST_REL),
+            &format!("shared settings: {summary}"),
+        ) {
+            Ok(Some(sha)) => {
+                soft(
+                    self.db
+                        .record(EventKind::Committed, "shared settings", summary),
+                );
+                self.last_commit = Some(sha);
+                self.commits += 1;
+                if self.remote_configured() {
+                    self.unpushed += 1;
+                    self.dirty = true;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => soft(Err::<(), _>(e)),
         }
     }
 

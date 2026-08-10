@@ -119,6 +119,9 @@ wukong install --no-track foo                 install without remembering")]
         /// Install without recording it ("don't track this one")
         #[arg(long)]
         no_track: bool,
+        /// Record it in the shared manifest — every machine wants it
+        #[arg(long, conflicts_with = "no_track")]
+        shared: bool,
     },
 
     /// Uninstall a package and drop it from the manifest
@@ -184,6 +187,32 @@ wukong track ~/.zshrc ~/.gitconfig ~/.config/starship.toml")]
         /// only way to track credential-named files (.env, .netrc…)
         #[arg(long)]
         sealed: bool,
+        /// Straight into the shared lane: every machine gets it
+        #[arg(long)]
+        shared: bool,
+    },
+
+    /// Move a tracked file to the shared lane (every machine's)
+    #[command(
+        long_about = "Promote a tracked file to the shared lane: it lands on the store's \
+`shared` branch, which every machine overlays — track it once, have it \
+everywhere. The machine branch always wins where both hold the same \
+path, and where two machines edit the same shared file the latest \
+commit wins. `--undo` brings a file back to this machine only.\n\n\
+Packages and settings share the same way: `wukong install --shared`, \
+`wukong pkg share`, `wukong settings share`."
+    )]
+    #[command(after_long_help = "EXAMPLES:\n  \
+wukong share ~/.gitconfig             every machine gets it\n  \
+wukong share --undo ~/.gitconfig      back to this machine only\n  \
+wukong track --shared ~/.vimrc        track and share in one step")]
+    Share {
+        /// A tracked file
+        #[arg(value_name = "PATH")]
+        path: String,
+        /// Back to this machine only
+        #[arg(long)]
+        undo: bool,
     },
 
     /// Take in what's already on this machine: dotfiles and packages
@@ -462,6 +491,17 @@ marks drift (recorded value differs from this machine)."
     },
     /// Show only the drift: recorded values this machine doesn't match
     Diff,
+
+    /// Move a recorded setting to the shared lane (every machine's)
+    Share {
+        #[arg(value_name = "DOMAIN")]
+        domain: String,
+        #[arg(value_name = "KEY")]
+        key: String,
+        /// Back to this machine only
+        #[arg(long)]
+        undo: bool,
+    },
     /// Apply every recorded value this machine doesn't match
     #[command(
         long_about = "Apply every recorded setting this machine has drifted from, via \
@@ -602,6 +642,19 @@ list (so it syncs), honored across reinstalls. Undo with \
         /// Which provider it belongs to
         #[arg(long, value_enum, default_value = "formula")]
         via: PkgProviderArg,
+    },
+
+    /// Move a manifest package to the shared lane (every machine's)
+    Share {
+        /// Package name (or `provider:name`)
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Which provider it belongs to
+        #[arg(long, value_enum, default_value = "formula")]
+        via: PkgProviderArg,
+        /// Back to this machine only
+        #[arg(long)]
+        undo: bool,
     },
 
     /// Allow a previously ignored package to be offered again
@@ -762,6 +815,57 @@ fn seal_key(action: &SealKeyAction) -> anyhow::Result<()> {
     }
 }
 
+fn run_pkg(action: PkgAction) -> anyhow::Result<()> {
+    match action {
+        PkgAction::List { json } => pkg_cli::list(json),
+        PkgAction::Sync { yes, dry_run } => pkg_cli::sync(yes, dry_run),
+        PkgAction::AdoptInstalled => pkg_cli::adopt_installed(),
+        PkgAction::Providers { json } => pkg_cli::providers(json),
+        PkgAction::Share { name, via, undo } => {
+            let (name, provider) = match wukong_core::pkg::parse_subject(&name) {
+                Some((p, bare)) => (bare.to_string(), p),
+                None => (name, via.into()),
+            };
+            say(Request::PkgShare {
+                provider,
+                name,
+                undo,
+            })
+        }
+        PkgAction::Ignore { name, via } => pkg_cli::ignore(&name, via.into(), false),
+        PkgAction::Unignore { name, via } => pkg_cli::ignore(&name, via.into(), true),
+    }
+}
+
+fn run_settings(action: SettingsAction) -> anyhow::Result<()> {
+    match action {
+        SettingsAction::List { json } => settings_cli::list(json),
+        SettingsAction::Diff => settings_cli::diff(),
+        SettingsAction::Share { domain, key, undo } => {
+            say(Request::SettingShare { domain, key, undo })
+        }
+        SettingsAction::Sync { yes } => settings_cli::sync(yes),
+        SettingsAction::Capture {
+            start,
+            diff,
+            all,
+            json,
+        } => {
+            let phase = if start {
+                settings_cli::CapturePhase::Start
+            } else if diff {
+                settings_cli::CapturePhase::Diff
+            } else {
+                settings_cli::CapturePhase::Interactive
+            };
+            settings_cli::capture(&phase, all, json)
+        }
+        SettingsAction::Record { domain, key } => settings_cli::record(&domain, &key),
+        SettingsAction::Ignore { domain, key } => settings_cli::ignore(&domain, &key, false),
+        SettingsAction::Unignore { domain, key } => settings_cli::ignore(&domain, &key, true),
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -773,48 +877,29 @@ fn main() -> anyhow::Result<()> {
             via,
             cask,
             no_track,
+            shared,
         }) => {
             let (name, provider) = name_and_provider(&name, via, cask);
-            pkg_cli::install(&name, provider, no_track)
+            pkg_cli::install(&name, provider, no_track, shared)
         }
         Some(Command::Rm { name, via, cask }) => {
             let (name, provider) = name_and_provider(&name, via, cask);
             pkg_cli::rm(&name, provider)
         }
-        Some(Command::Pkg { action }) => match action {
-            PkgAction::List { json } => pkg_cli::list(json),
-            PkgAction::Sync { yes, dry_run } => pkg_cli::sync(yes, dry_run),
-            PkgAction::AdoptInstalled => pkg_cli::adopt_installed(),
-            PkgAction::Providers { json } => pkg_cli::providers(json),
-            PkgAction::Ignore { name, via } => pkg_cli::ignore(&name, via.into(), false),
-            PkgAction::Unignore { name, via } => pkg_cli::ignore(&name, via.into(), true),
-        },
-        Some(Command::Settings { action }) => match action {
-            SettingsAction::List { json } => settings_cli::list(json),
-            SettingsAction::Diff => settings_cli::diff(),
-            SettingsAction::Sync { yes } => settings_cli::sync(yes),
-            SettingsAction::Capture {
-                start,
-                diff,
-                all,
-                json,
-            } => {
-                let phase = if start {
-                    settings_cli::CapturePhase::Start
-                } else if diff {
-                    settings_cli::CapturePhase::Diff
-                } else {
-                    settings_cli::CapturePhase::Interactive
-                };
-                settings_cli::capture(&phase, all, json)
-            }
-            SettingsAction::Record { domain, key } => settings_cli::record(&domain, &key),
-            SettingsAction::Ignore { domain, key } => settings_cli::ignore(&domain, &key, false),
-            SettingsAction::Unignore { domain, key } => settings_cli::ignore(&domain, &key, true),
-        },
-        Some(Command::Track { paths, sealed }) => {
+        Some(Command::Pkg { action }) => run_pkg(action),
+        Some(Command::Settings { action }) => run_settings(action),
+        Some(Command::Share { path, undo }) => say(Request::Share { path, undo }),
+        Some(Command::Track {
+            paths,
+            sealed,
+            shared,
+        }) => {
             for path in paths {
-                say(Request::Track { path, sealed })?;
+                say(Request::Track {
+                    path,
+                    sealed,
+                    shared,
+                })?;
             }
             Ok(())
         }
@@ -939,7 +1024,14 @@ fn files(json: bool) -> anyhow::Result<()> {
     }
     for f in files {
         let mark = if f.exists { " " } else { "!" };
-        println!("{mark} {}", f.display);
+        let mut lanes = String::new();
+        if f.shared {
+            lanes.push_str("  (shared)");
+        }
+        if f.sealed {
+            lanes.push_str("  (sealed)");
+        }
+        println!("{mark} {}{lanes}", f.display);
     }
     Ok(())
 }

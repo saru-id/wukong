@@ -61,7 +61,7 @@ pub(crate) fn run_tool(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn install(name: &str, provider: Provider, no_track: bool) -> anyhow::Result<()> {
+pub fn install(name: &str, provider: Provider, no_track: bool, shared: bool) -> anyhow::Result<()> {
     let args = provider
         .install_args(name)
         .ok_or_else(|| anyhow::anyhow!("{} cannot install", provider.as_str()))?;
@@ -69,7 +69,7 @@ pub fn install(name: &str, provider: Provider, no_track: bool) -> anyhow::Result
     // Even an untracked install is ACKNOWLEDGED to the daemon —
     // otherwise the watcher would offer it for adoption seconds after
     // the user explicitly opted out.
-    record(provider, name, false, no_track);
+    record(provider, name, false, shared, no_track);
     Ok(())
 }
 
@@ -82,15 +82,16 @@ pub fn rm(name: &str, provider: Provider) -> anyhow::Result<()> {
         )
     })?;
     run_tool(&args)?;
-    record(provider, name, true, false);
+    record(provider, name, true, false, false);
     Ok(())
 }
 
-fn record(provider: Provider, name: &str, remove: bool, observe_only: bool) {
+fn record(provider: Provider, name: &str, remove: bool, shared: bool, observe_only: bool) {
     let req = Request::PkgRecord {
         provider,
         name: name.to_string(),
         remove,
+        shared,
         observe_only,
     };
     match client::call(req) {
@@ -125,10 +126,11 @@ pub fn list(json: bool) -> anyhow::Result<()> {
         };
         let version = e.version.as_deref().unwrap_or("");
         println!(
-            "{mark} {:36} {:14} {}",
+            "{mark} {:36} {:14} {}{}",
             e.name,
             version,
-            e.provider.as_str()
+            e.provider.as_str(),
+            if e.shared { "  (shared)" } else { "" }
         );
     }
     if missing > 0 {

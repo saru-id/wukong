@@ -257,7 +257,12 @@ async fn main() -> anyhow::Result<()> {
 fn start_push(engine: &mut Engine, tx: mpsc::UnboundedSender<Msg>) {
     let store = engine.begin_push();
     tokio::task::spawn_blocking(move || {
-        let result = store.push().map_err(|e| e.to_string());
+        // Machine branch first, then the shared lane — which may need
+        // to fold in another machine's push before its own lands.
+        let result = store
+            .push()
+            .and_then(|()| store.push_shared())
+            .map_err(|e| e.to_string());
         let _ = tx.send(Msg::PushDone(result));
     });
 }

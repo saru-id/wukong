@@ -85,6 +85,21 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
   pkg adopt-installed` bulk-imports an existing machine's whole
   package world on day one.
 
+### The shared lane
+
+- **Track it once, have it everywhere.** The store carries a `shared`
+  branch every machine overlays. `wukong track --shared ~/.vimrc` (or
+  `wukong share` to promote later) puts a file there; `wukong install
+  --shared jq`, `wukong pkg share`, and `wukong settings share` do the
+  same for packages and settings. `wukong sync` on any machine pulls
+  the whole shared world in.
+- **The machine always wins.** A machine-lane file, package entry, or
+  setting shadows its shared counterpart — per-machine variance
+  without a template language. Where two machines edit the same
+  shared file, the latest commit wins, and remote shared updates only
+  ever touch the mirror: live files change through `wukong sync`,
+  never behind your back.
+
 ### Settings
 
 - **macOS behavior, governed like everything else.** A curated corpus

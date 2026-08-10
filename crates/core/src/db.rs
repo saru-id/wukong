@@ -45,6 +45,7 @@ impl Db {
                 path         TEXT PRIMARY KEY,
                 added_ts     TEXT NOT NULL,
                 sealed       INTEGER NOT NULL DEFAULT 0,
+                shared       INTEGER NOT NULL DEFAULT 0,
                 content_hash TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS inbox (
@@ -144,6 +145,14 @@ impl Db {
         Ok(inserted > 0)
     }
 
+    pub fn set_shared(&self, path: &str, shared: bool) -> Result<(), DbError> {
+        self.conn.execute(
+            "UPDATE tracked SET shared = ?2 WHERE path = ?1",
+            params![path, i64::from(shared)],
+        )?;
+        Ok(())
+    }
+
     pub fn set_sealed(&self, path: &str, sealed: bool) -> Result<(), DbError> {
         self.conn.execute(
             "UPDATE tracked SET sealed = ?2 WHERE path = ?1",
@@ -177,12 +186,18 @@ impl Db {
             > 0)
     }
 
-    /// Every tracked file as (store-relative path, sealed).
-    pub fn tracked(&self) -> Result<Vec<(String, bool)>, DbError> {
+    /// Every tracked file as (store-relative path, sealed, shared).
+    pub fn tracked(&self) -> Result<Vec<(String, bool, bool)>, DbError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT path, sealed FROM tracked ORDER BY path")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)))?;
+            .prepare("SELECT path, sealed, shared FROM tracked ORDER BY path")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get::<_, i64>(1)? != 0,
+                row.get::<_, i64>(2)? != 0,
+            ))
+        })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -391,10 +406,16 @@ mod tests {
         let db = db();
         assert!(db.track(".zshrc", false).unwrap());
         assert!(!db.track(".zshrc", false).unwrap()); // idempotent
-        assert_eq!(db.tracked().unwrap(), vec![(".zshrc".to_string(), false)]);
+        assert_eq!(
+            db.tracked().unwrap(),
+            vec![(".zshrc".to_string(), false, false)]
+        );
         // Re-tracking sealed upgrades in place.
         db.track(".zshrc", true).unwrap();
-        assert_eq!(db.tracked().unwrap(), vec![(".zshrc".to_string(), true)]);
+        assert_eq!(
+            db.tracked().unwrap(),
+            vec![(".zshrc".to_string(), true, false)]
+        );
         db.set_content_hash(".zshrc", "abc123").unwrap();
         assert_eq!(
             db.content_hash(".zshrc").unwrap().as_deref(),

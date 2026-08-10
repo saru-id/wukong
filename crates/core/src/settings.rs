@@ -807,6 +807,13 @@ impl SettingsManifest {
             .insert(key.to_string());
     }
 
+    /// Drop a recorded value (a lane move, not an opt-out).
+    pub fn remove(&mut self, domain: &str, key: &str) -> bool {
+        self.settings
+            .get_mut(domain)
+            .is_some_and(|keys| keys.remove(key).is_some())
+    }
+
     pub fn remove_ignore(&mut self, domain: &str, key: &str) -> bool {
         self.ignore
             .get_mut(domain)

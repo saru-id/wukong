@@ -107,9 +107,7 @@ impl Engine {
                     &pkg::subject(provider, name),
                     Resolution::Skip,
                 ));
-                if baseline
-                    || self.manifest.contains(provider, name)
-                    || self.manifest.ignored(provider, name)
+                if baseline || self.pkg_wanted(provider, name) || self.pkg_unwanted(provider, name)
                 {
                     continue;
                 }
@@ -123,7 +121,7 @@ impl Engine {
                     &pkg::subject(provider, name),
                     Resolution::Skip,
                 ));
-                if baseline || !self.manifest.contains(provider, name) {
+                if baseline || !self.pkg_wanted(provider, name) {
                     continue;
                 }
                 new_items += self.offer_package_gone(provider, name);
@@ -137,7 +135,8 @@ impl Engine {
         let body = format!(
             "{name} ({}) was installed outside wukong.\n\n\
              approve — add it to the manifest; wukong remembers it\n\
-             ignore  — never ask about {name} again",
+             never   — don't ask about {name} again\n\
+             skip    — not now",
             provider.as_str()
         );
         let outcome = self
@@ -158,7 +157,7 @@ impl Engine {
         let body = format!(
             "{name} ({}) is in the manifest but no longer installed.\n\n\
              approve — drop it from the manifest\n\
-             ignore  — keep it (pkg sync can reinstall it)",
+             skip    — keep it (pkg sync can reinstall it)",
             provider.as_str()
         );
         let outcome = self
@@ -173,6 +172,97 @@ impl Engine {
             .unwrap_or_else(refreshed);
         soft(self.db.record(EventKind::PkgGone, &subject, ""));
         usize::from(outcome == InboxOutcome::New)
+    }
+
+    /// Wanted by this machine OR by every machine.
+    fn pkg_wanted(&self, provider: Provider, name: &str) -> bool {
+        self.manifest.contains(provider, name) || self.shared_manifest.contains(provider, name)
+    }
+
+    fn pkg_unwanted(&self, provider: Provider, name: &str) -> bool {
+        self.manifest.ignored(provider, name) || self.shared_manifest.ignored(provider, name)
+    }
+
+    /// Move a manifest package between the machine and shared lanes,
+    /// its App Store id riding along.
+    pub(super) fn pkg_share(&mut self, provider: Provider, name: &str, undo: bool) -> Response {
+        let subject = pkg::subject(provider, name);
+        let (has, id) = if undo {
+            (
+                self.shared_manifest.contains(provider, name),
+                self.shared_manifest
+                    .id_of(provider, name)
+                    .map(str::to_string),
+            )
+        } else {
+            (
+                self.manifest.contains(provider, name),
+                self.manifest.id_of(provider, name).map(str::to_string),
+            )
+        };
+        if !has {
+            return Response::Error {
+                message: format!(
+                    "{subject} is not in the {} manifest",
+                    if undo { "shared" } else { "machine" }
+                ),
+            };
+        }
+        if undo {
+            self.shared_manifest.remove(provider, name);
+            self.manifest.add(provider, name);
+            if let Some(id) = id {
+                self.manifest.set_id(provider, name, &id);
+            }
+        } else {
+            self.manifest.remove(provider, name);
+            self.shared_manifest.add(provider, name);
+            if let Some(id) = id {
+                self.shared_manifest.set_id(provider, name, &id);
+            }
+        }
+        let lane = if undo { "machine" } else { "shared" };
+        self.commit_manifest(&format!("{name} moved to the {lane} lane"));
+        self.commit_shared_manifest(&format!("{name} moved to the {lane} lane"));
+        soft(self.db.record(EventKind::Shared, &subject, lane));
+        Response::Ok {
+            message: format!("{subject} now syncs to the {lane} lane"),
+        }
+    }
+
+    /// The shared twin of `commit_manifest`.
+    fn commit_shared_manifest(&mut self, summary: &str) {
+        let shared = self.store.shared();
+        if let Ok(text) = toml::to_string_pretty(&self.shared_manifest)
+            && let GateVerdict::Quarantine(_) = gate::scan(Path::new(pkg::MANIFEST_REL), &text)
+        {
+            soft(self.db.record(
+                EventKind::Held,
+                "shared packages",
+                "manifest failed the secret gate — not committed",
+            ));
+            return;
+        }
+        soft(self.shared_manifest.save(shared.dir()));
+        match shared.commit(
+            Path::new(pkg::MANIFEST_REL),
+            &format!("shared packages: {summary}"),
+        ) {
+            Ok(Some(sha)) => {
+                soft(
+                    self.db
+                        .record(EventKind::Committed, "shared packages", summary),
+                );
+                self.last_commit = Some(sha);
+                self.commits += 1;
+                if self.remote_configured() {
+                    self.unpushed += 1;
+                    self.dirty = true;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => soft(Err::<(), _>(e)),
+        }
     }
 
     /// Persist the manifest into the store and commit it under the
@@ -221,6 +311,7 @@ impl Engine {
         provider: Provider,
         name: &str,
         remove: bool,
+        shared: bool,
         observe_only: bool,
     ) -> Response {
         let subject = pkg::subject(provider, name);
@@ -255,7 +346,13 @@ impl Engine {
             };
         }
         if remove {
-            self.manifest.remove(provider, name);
+            // Drop it from whichever lane holds it.
+            if self.manifest.remove(provider, name) {
+                self.commit_manifest(&format!("-{name}"));
+            }
+            if self.shared_manifest.remove(provider, name) {
+                self.commit_shared_manifest(&format!("-{name}"));
+            }
             soft(self.db.pkg_state_remove(provider.as_str(), name));
             soft(self.db.record(EventKind::PkgRemoved, &subject, ""));
             // An explicit removal supersedes any pending gone-offer.
@@ -263,12 +360,17 @@ impl Engine {
                 self.db
                     .inbox_resolve_open(InboxKind::PackageGone, &subject, Resolution::Approve),
             );
-            self.commit_manifest(&format!("-{name}"));
             Response::Ok {
                 message: format!("{name} removed from the manifest"),
             }
         } else {
-            self.manifest.add(provider, name);
+            if shared {
+                self.shared_manifest.add(provider, name);
+                self.commit_shared_manifest(&format!("+{name}"));
+            } else {
+                self.manifest.add(provider, name);
+                self.commit_manifest(&format!("+{name}"));
+            }
             soft(self.db.pkg_state_add(provider.as_str(), name));
             soft(self.db.record(EventKind::PkgInstalled, &subject, ""));
             // An explicit install supersedes any pending adopt-offer.
@@ -276,9 +378,11 @@ impl Engine {
                 self.db
                     .inbox_resolve_open(InboxKind::Package, &subject, Resolution::Approve),
             );
-            self.commit_manifest(&format!("+{name}"));
             Response::Ok {
-                message: format!("{name} recorded in the manifest"),
+                message: format!(
+                    "{name} recorded in the {} manifest",
+                    if shared { "shared" } else { "machine" }
+                ),
             }
         }
     }
@@ -291,23 +395,33 @@ impl Engine {
             .iter()
             .map(|(p, set)| (*p, set))
             .collect();
-        Response::Packages {
-            entries: self
-                .manifest
-                .entries()
-                .into_iter()
-                .map(|(provider, name)| {
-                    let live = installed.get(&provider).and_then(|set| set.get(&name));
-                    PkgEntry {
-                        installed: live.is_some(),
-                        version: live.and_then(Clone::clone),
-                        id: self.manifest.id_of(provider, &name).map(str::to_string),
-                        provider,
-                        name,
-                    }
-                })
-                .collect(),
+        // The union of both lanes, shared entries marked; a name in
+        // both lanes lists once, as shared.
+        let mut seen: std::collections::HashSet<(Provider, String)> =
+            std::collections::HashSet::new();
+        let mut entries = Vec::new();
+        for (lane_shared, manifest) in [(true, &self.shared_manifest), (false, &self.manifest)] {
+            for (provider, name) in manifest.entries() {
+                if !seen.insert((provider, name.clone())) {
+                    continue;
+                }
+                let live = installed.get(&provider).and_then(|set| set.get(&name));
+                entries.push(PkgEntry {
+                    installed: live.is_some(),
+                    version: live.and_then(Clone::clone),
+                    id: self
+                        .manifest
+                        .id_of(provider, &name)
+                        .or_else(|| self.shared_manifest.id_of(provider, &name))
+                        .map(str::to_string),
+                    shared: lane_shared,
+                    provider,
+                    name,
+                });
+            }
         }
+        entries.sort_by(|a, b| (a.provider, &a.name).cmp(&(b.provider, &b.name)));
+        Response::Packages { entries }
     }
 
     pub(super) fn pkg_providers(&self) -> Response {
@@ -377,8 +491,8 @@ impl Engine {
             }
             for name in installed.into_keys() {
                 soft(self.db.pkg_state_add(provider.as_str(), &name));
-                if !self.manifest.contains(provider, &name)
-                    && !self.manifest.ignored(provider, &name)
+                if !self.pkg_wanted(provider, &name)
+                    && !self.pkg_unwanted(provider, &name)
                     && self.manifest.add(provider, &name)
                 {
                     adopted += 1;
@@ -449,12 +563,21 @@ impl Engine {
                 self.commit_manifest(&format!("ignore {name}"));
             }
             (InboxKind::PackageGone, Resolution::Approve) => {
-                self.manifest.remove(provider, &name);
+                // Drop it from the lane that wants it — for a shared
+                // entry that means EVERY machine stops wanting it.
+                if self.manifest.remove(provider, &name) {
+                    self.commit_manifest(&format!("-{name}"));
+                }
+                if self.shared_manifest.remove(provider, &name) {
+                    self.commit_shared_manifest(&format!("-{name}"));
+                }
                 soft(self.db.record(EventKind::PkgRemoved, subject, "from inbox"));
-                self.commit_manifest(&format!("-{name}"));
             }
             (InboxKind::PackageGone, Resolution::Never) => {
                 // Gone AND never ask again: drop it and ignore it.
+                if self.shared_manifest.remove(provider, &name) {
+                    self.commit_shared_manifest(&format!("-{name}"));
+                }
                 self.manifest.remove(provider, &name);
                 self.manifest.add_ignore(provider, &name);
                 soft(self.db.record(EventKind::PkgIgnored, subject, "from inbox"));

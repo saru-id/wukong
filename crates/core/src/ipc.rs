@@ -36,6 +36,9 @@ pub enum Request {
         /// tracking forbidden-named files, since plaintext never
         /// reaches git).
         sealed: bool,
+        /// Straight into the shared lane: every machine gets it.
+        #[serde(default)]
+        shared: bool,
     },
     Untrack {
         path: String,
@@ -66,6 +69,9 @@ pub enum Request {
         provider: Provider,
         name: String,
         remove: bool,
+        /// Record into the shared manifest — every machine wants it.
+        #[serde(default)]
+        shared: bool,
         /// Acknowledge the install in package state WITHOUT adding it
         /// to the manifest — the `--no-track` opt-out. Without this
         /// acknowledgement the watcher would offer the package for
@@ -96,6 +102,27 @@ pub enum Request {
     /// Live file vs stored copy, as a unified diff.
     Diff {
         path: String,
+    },
+    /// Move a tracked file between the machine and shared lanes.
+    Share {
+        path: String,
+        /// Back to this machine only.
+        #[serde(default)]
+        undo: bool,
+    },
+    /// Move a manifest package between the machine and shared lanes.
+    PkgShare {
+        provider: Provider,
+        name: String,
+        #[serde(default)]
+        undo: bool,
+    },
+    /// Move a recorded setting between the machine and shared lanes.
+    SettingShare {
+        domain: String,
+        key: String,
+        #[serde(default)]
+        undo: bool,
     },
     /// Convert a tracked file to the sealed lane.
     Seal {
@@ -180,6 +207,8 @@ pub struct PkgEntry {
     pub version: Option<String>,
     /// External install id (App Store), when captured at adoption.
     pub id: Option<String>,
+    /// Wanted by every machine (shared manifest), not just this one.
+    pub shared: bool,
 }
 
 /// One row of `pkg providers`.
@@ -242,4 +271,6 @@ pub struct TrackedFile {
     pub exists: bool,
     /// Stored as age ciphertext only.
     pub sealed: bool,
+    /// Lives in the shared lane — every machine gets it.
+    pub shared: bool,
 }

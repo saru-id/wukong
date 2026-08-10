@@ -40,7 +40,7 @@ fn rig() -> Rig {
 fn track(rig: &mut Rig, name: &str, content: &str) -> PathBuf {
     let file = rig.home.join(name);
     std::fs::write(&file, content).unwrap();
-    let resp = rig.engine.track(file.to_str().unwrap(), false);
+    let resp = rig.engine.track(file.to_str().unwrap(), false, false);
     assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
     file
 }
@@ -161,7 +161,7 @@ fn track_refuses_forbidden() {
     let mut rig = rig();
     let env = rig.home.join(".env");
     std::fs::write(&env, "SECRET=x").unwrap();
-    let resp = rig.engine.track(env.to_str().unwrap(), false);
+    let resp = rig.engine.track(env.to_str().unwrap(), false, false);
     assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
 }
 
@@ -275,7 +275,8 @@ fn manifest_member_gone_offers_removal() {
     let mut rig = pkg_rig();
     rig.engine.reconcile();
     brew_install(&rig, "jq", true);
-    rig.engine.pkg_record(Provider::Formula, "jq", false, false);
+    rig.engine
+        .pkg_record(Provider::Formula, "jq", false, false, false);
     rig.engine.reconcile();
     assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
 
@@ -295,7 +296,8 @@ fn pkg_record_supersedes_open_offer() {
     rig.engine.reconcile();
     assert_eq!(rig.engine.db.inbox_count().unwrap(), 1);
     // The user runs `wukong install fd` after brew already had it.
-    rig.engine.pkg_record(Provider::Formula, "fd", false, false);
+    rig.engine
+        .pkg_record(Provider::Formula, "fd", false, false, false);
     assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
     assert!(rig.engine.manifest.contains(Provider::Formula, "fd"));
 }
@@ -319,7 +321,8 @@ fn bulk_adopt_takes_brew_not_apps() {
 #[test]
 fn restore_skips_wukong_namespace() {
     let mut rig = pkg_rig();
-    rig.engine.pkg_record(Provider::Formula, "jq", false, false);
+    rig.engine
+        .pkg_record(Provider::Formula, "jq", false, false, false);
     let resp = rig.engine.restore(None, false);
     let Response::Ok { message } = resp else {
         panic!("restore failed");
@@ -390,7 +393,8 @@ fn observe_only_acknowledges_without_manifest() {
     brew_install(&rig, "jq", true);
     // `wukong install --no-track jq`: reality acknowledged, manifest
     // untouched, and no later adoption offer for it.
-    rig.engine.pkg_record(Provider::Formula, "jq", false, true);
+    rig.engine
+        .pkg_record(Provider::Formula, "jq", false, false, true);
     assert!(!rig.engine.manifest.contains(Provider::Formula, "jq"));
     assert_eq!(rig.engine.reconcile(), 0);
     assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
@@ -436,7 +440,7 @@ fn poisoned_manifest_blocks_offers_and_saves() {
     assert_eq!(engine.reconcile(), 0);
     assert_eq!(engine.db.inbox_count().unwrap(), 0);
     // And a record attempt must not clobber the unparseable file.
-    engine.pkg_record(Provider::Formula, "ripgrep", false, false);
+    engine.pkg_record(Provider::Formula, "ripgrep", false, false, false);
     assert_eq!(
         std::fs::read_to_string(&manifest_path).unwrap(),
         "this is [not toml"
@@ -491,7 +495,7 @@ fn exclude_silences_a_subtree_and_resolves_open_offers() {
     // Tracking still outranks excluding.
     let tracked = home.join("config-tree/noisyapp/keep.conf");
     std::fs::write(&tracked, "keep=1\n").unwrap();
-    let resp = engine.track(tracked.to_str().unwrap(), false);
+    let resp = engine.track(tracked.to_str().unwrap(), false, false);
     assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
     std::fs::write(&tracked, "keep=2\n").unwrap();
     engine.touch(tracked.clone());
@@ -856,10 +860,10 @@ fn sealed_track_stores_ciphertext_only_with_hash_guard() {
 
     // .env is forbidden plaintext — but sealed tracking is the point.
     assert!(matches!(
-        rig.engine.track(file.to_str().unwrap(), false),
+        rig.engine.track(file.to_str().unwrap(), false, false),
         Response::Error { .. }
     ));
-    let resp = rig.engine.track(file.to_str().unwrap(), true);
+    let resp = rig.engine.track(file.to_str().unwrap(), true, false);
     assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
 
     // The store holds age ciphertext, never the plaintext.
@@ -930,7 +934,7 @@ fn restore_decrypts_sealed_files_and_keeps_them_sealed() {
     let file = rig.home.join(".env");
     let plaintext = format!("TOKEN={SEALED_SECRET}\n");
     std::fs::write(&file, &plaintext).unwrap();
-    rig.engine.track(file.to_str().unwrap(), true);
+    rig.engine.track(file.to_str().unwrap(), true, false);
 
     std::fs::remove_file(&file).unwrap();
     // Removing tracked state simulates a fresh machine with the store
@@ -966,7 +970,7 @@ fn unseal_goes_back_through_the_gate() {
     let mut rig = seal_rig();
     let file = rig.home.join(".sealed-config");
     std::fs::write(&file, format!("export T={SEALED_SECRET}\n")).unwrap();
-    rig.engine.track(file.to_str().unwrap(), true);
+    rig.engine.track(file.to_str().unwrap(), true, false);
     let resp = rig.engine.unseal(file.to_str().unwrap());
     assert!(matches!(resp, Response::Ok { .. }));
     // The secret is now HELD — plaintext did not slip into the store.
@@ -1212,7 +1216,7 @@ fn sentinel_never_excludes_and_quarantine_rejects_never() {
     // A quarantined secret cannot be waved off forever.
     let notes = rig.home.join("notes.txt");
     std::fs::write(&notes, "ok\n").unwrap();
-    rig.engine.track(notes.to_str().unwrap(), false);
+    rig.engine.track(notes.to_str().unwrap(), false, false);
     std::fs::write(
         &notes,
         "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n",
@@ -1230,4 +1234,119 @@ fn sentinel_never_excludes_and_quarantine_rejects_never() {
         .expect("quarantined");
     let resp = rig.engine.resolve(q.id, Resolution::Never);
     assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
+}
+
+#[test]
+fn shared_lane_moves_files_both_ways() {
+    let mut rig = rig();
+    let file = track(&mut rig, ".gitconfig", "[user]\n\tname = s\n");
+    let rel = paths::store_rel(&file);
+    assert!(rig.engine.store.dir().join(&rel).is_file());
+
+    // Promote: the mirror moves to the shared branch.
+    let resp = rig.engine.share(file.to_str().unwrap(), false);
+    assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
+    let shared = rig.engine.store.shared();
+    assert!(!rig.engine.store.dir().join(&rel).is_file());
+    assert!(shared.dir().join(&rel).is_file());
+
+    // Edits now commit to the shared branch.
+    edit_and_settle(&mut rig, &file, "[user]\n\tname = t\n");
+    assert_eq!(
+        std::fs::read_to_string(shared.dir().join(&rel)).unwrap(),
+        "[user]\n\tname = t\n"
+    );
+
+    // Restore finds the shared file and re-marks it shared.
+    std::fs::remove_file(&file).unwrap();
+    rig.engine.restore(Some(file.to_str().unwrap()), false);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "[user]\n\tname = t\n"
+    );
+    let roster = rig.engine.db.tracked().unwrap();
+    assert!(
+        roster
+            .iter()
+            .any(|(r, _, shared)| r.ends_with(".gitconfig") && *shared),
+        "{roster:?}"
+    );
+
+    // Undo brings it home.
+    let resp = rig.engine.share(file.to_str().unwrap(), true);
+    assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
+    assert!(rig.engine.store.dir().join(&rel).is_file());
+    assert!(!shared.dir().join(&rel).is_file());
+}
+
+#[test]
+fn shared_manifest_counts_as_wanted_and_moves() {
+    let mut rig = pkg_rig();
+    rig.engine.reconcile(); // baseline
+    // A shared install is wanted everywhere…
+    rig.engine
+        .pkg_record(Provider::Formula, "jq", false, true, false);
+    assert!(rig.engine.shared_manifest.contains(Provider::Formula, "jq"));
+    assert!(!rig.engine.manifest.contains(Provider::Formula, "jq"));
+    // …so when it appears on disk there is NO adopt offer.
+    brew_install(&rig, "jq", true);
+    assert_eq!(rig.engine.reconcile(), 0);
+    let Response::Packages { entries } = rig.engine.pkg_list() else {
+        panic!("expected package list");
+    };
+    let jq = entries.iter().find(|e| e.name == "jq").unwrap();
+    assert!(jq.shared && jq.installed);
+
+    // Lane moves carry the entry (and rm drops it from wherever).
+    rig.engine.pkg_share(Provider::Formula, "jq", true);
+    assert!(rig.engine.manifest.contains(Provider::Formula, "jq"));
+    assert!(!rig.engine.shared_manifest.contains(Provider::Formula, "jq"));
+    rig.engine.pkg_share(Provider::Formula, "jq", false);
+    rig.engine
+        .pkg_record(Provider::Formula, "jq", true, false, false);
+    assert!(!rig.engine.shared_manifest.contains(Provider::Formula, "jq"));
+}
+
+#[test]
+fn shared_settings_fill_in_behind_machine_values() {
+    let (mut rig, prefs) = settings_rig();
+    write_pref(
+        &prefs,
+        "com.apple.dock",
+        "autohide",
+        plist::Value::Boolean(true),
+    );
+    rig.engine.reconcile_settings(); // baseline
+    let resp = rig.engine.settings_record("com.apple.dock", "autohide");
+    assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
+
+    // Promote to shared: the machine manifest empties, the union
+    // still wants it — a matching change stays quiet.
+    let resp = rig
+        .engine
+        .setting_share("com.apple.dock", "autohide", false);
+    assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
+    assert!(
+        rig.engine
+            .settings_manifest
+            .desired("com.apple.dock", "autohide")
+            .is_none()
+    );
+    assert!(
+        rig.engine
+            .shared_settings
+            .desired("com.apple.dock", "autohide")
+            .is_some()
+    );
+    write_pref(
+        &prefs,
+        "com.apple.dock",
+        "autohide",
+        plist::Value::Boolean(false),
+    );
+    assert_eq!(
+        rig.engine.reconcile_settings(),
+        1,
+        "drift from a shared value still offers"
+    );
 }

@@ -174,6 +174,21 @@ application that may sit nearby on disk as `../wukong-backup`).
   exercise one lane MUST disable the others in their config (packages
   detection would otherwise read the developer's real machine).
 
+- **The shared lane is an overlay, and the machine ALWAYS wins.** The
+  `shared` branch lives as a sibling worktree (`Store::shared()` is a
+  full Store against it — never construct a second Store by path).
+  Effective wanted/desired = machine ∪ shared with machine winning;
+  restore/sync unions the file lists the same way. A NEW machine's
+  branch starts EMPTY (orphan root) — seeding it from clone HEAD
+  would shadow the shared lane forever. Shared push: try, and on
+  rejection fold origin in with `rebase -X theirs` (in a rebase,
+  "theirs" is the LOCAL patch — live files win across machines too).
+  refresh_shared runs on the rescan heartbeat and must reload the
+  shared manifests; live files are never rewritten from remote —
+  that's `wukong sync`'s job, on the user's command. Sealed shared
+  files require the seal identity on every machine (seal-key
+  export/import).
+
 ## Verification
 
 ```sh
