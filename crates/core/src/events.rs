@@ -38,6 +38,10 @@ pub enum EventKind {
     Unsealed,
     /// A lane move, or shared updates arriving from another machine.
     Shared,
+    /// The governor noticed something wrong with itself.
+    Health,
+    /// A tracked file rewound to an earlier stored version.
+    Reverted,
 }
 
 impl EventKind {
@@ -64,6 +68,8 @@ impl EventKind {
             Self::SettingIgnored => "setting-ignored",
             Self::Sealed => "sealed",
             Self::Shared => "shared",
+            Self::Health => "health",
+            Self::Reverted => "reverted",
             Self::Unsealed => "unsealed",
         }
     }
@@ -108,6 +114,10 @@ pub enum InboxKind {
     /// A governed setting changed — record the new value? (`never`
     /// puts the key on the manifest's ignore list.)
     Setting,
+    /// The governor reporting on itself: pushes failing, a quarantine
+    /// waiting too long, store damage. `approve` runs the obvious fix
+    /// where one exists; `skip` dismisses for a day.
+    Health,
 }
 
 impl InboxKind {
@@ -119,6 +129,7 @@ impl InboxKind {
             Self::Package => "package",
             Self::PackageGone => "package-gone",
             Self::Setting => "setting",
+            Self::Health => "health",
         }
     }
 
@@ -130,6 +141,7 @@ impl InboxKind {
             "package" => Some(Self::Package),
             "package-gone" => Some(Self::PackageGone),
             "setting" => Some(Self::Setting),
+            "health" => Some(Self::Health),
             _ => None,
         }
     }

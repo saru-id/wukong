@@ -159,6 +159,17 @@ echo 'set -o vi' > "$HOME/.inputrc"
 FILES=$("$W" files)
 check "adopt tracked the found dotfiles" "echo \"\$FILES\" | grep -q gitconfig && echo \"\$FILES\" | grep -q inputrc"
 
+echo "=== revert rewinds forward"
+printf 'revert v1\n' > "$HOME/.rvt"
+"$W" track "$HOME/.rvt" > /dev/null
+sleep 2.5
+printf 'revert v2\n' > "$HOME/.rvt"
+sleep 2.5
+"$W" revert "$HOME/.rvt" > /dev/null
+sleep 2.5
+check "live file rewound to the previous version" "grep -q 'revert v1' \"$HOME/.rvt\""
+check "the rewind is a NEW commit, not a rewrite" "[ \"\$(\"$W\" log \"$HOME/.rvt\" | wc -l | tr -d ' ')\" = 3 ]"
+
 echo "=== diff + log"
 echo 'export Z=9' >> "$HOME/.zshrc"
 DIFF=$("$W" diff ~/.zshrc)

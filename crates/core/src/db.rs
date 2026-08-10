@@ -121,6 +121,20 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Timestamp of the most recent event of one kind and subject —
+    /// how the health checks bound their own nagging.
+    pub fn last_event_for(
+        &self,
+        kind: EventKind,
+        subject: &str,
+    ) -> Result<Option<String>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ts FROM events WHERE kind = ?1 AND subject = ?2 ORDER BY id DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![kind.as_str(), subject], |row| row.get(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
     /// Timestamp of the most recent event of one kind — how `status`
     /// answers "when did we last push" across daemon restarts.
     pub fn last_event(&self, kind: EventKind) -> Result<Option<String>, DbError> {

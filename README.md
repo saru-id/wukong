@@ -47,6 +47,15 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
   `wukong log` shows a file's commit history, `wukong status` says how
   long ago the last push landed — the daemon is auditable from any
   shell, which matters most on a machine you are not sitting at.
+- **Every change reversible.** `wukong revert` writes an earlier
+  stored version back over the live file — defaulting to "undo the
+  last change", or `--to` any commit from the log. History only moves
+  forward: the rewind commits through the normal gated flow.
+- **The governor governs itself.** Pushes failing for a day, a
+  quarantined secret waiting a week, a store repository git can no
+  longer walk — each escalates as an inbox item through the same
+  notification path as everything else. Silence and calm are not the
+  same thing.
 
 ### Packages
 

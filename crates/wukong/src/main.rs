@@ -261,6 +261,28 @@ store agree."
         path: String,
     },
 
+    /// Rewind a tracked file to an earlier stored version
+    #[command(
+        long_about = "Write an earlier stored version back over the live file. History \
+only moves forward: the rewind then commits through the normal gated \
+flow, so `wukong log` shows the revert as a new entry and nothing is \
+ever rewritten. Defaults to the version before the last change; \
+`--to` picks any commit from `wukong log`. Sealed files decrypt on \
+the way out and re-seal on the way back in."
+    )]
+    #[command(after_long_help = "EXAMPLES:\n  \
+wukong revert ~/.zshrc                undo the last change\n  \
+wukong log ~/.zshrc                   find an older version\n  \
+wukong revert --to 4a5b6c7 ~/.zshrc   rewind to exactly there")]
+    Revert {
+        /// A tracked file
+        #[arg(value_name = "PATH")]
+        path: String,
+        /// A commit from `wukong log` (default: before the last change)
+        #[arg(long, value_name = "COMMIT")]
+        to: Option<String>,
+    },
+
     /// Show the store's commit history for a tracked file
     Log {
         /// A tracked file
@@ -889,6 +911,7 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Pkg { action }) => run_pkg(action),
         Some(Command::Settings { action }) => run_settings(action),
         Some(Command::Share { path, undo }) => say(Request::Share { path, undo }),
+        Some(Command::Revert { path, to }) => say(Request::Revert { path, to }),
         Some(Command::Track {
             paths,
             sealed,

@@ -189,6 +189,16 @@ application that may sit nearby on disk as `../wukong-backup`).
   files require the seal identity on every machine (seal-key
   export/import).
 
+- **Health checks nag boundedly and act conservatively.** At most
+  hourly (`health_tick` piggybacks on tick), one alert per subject per
+  24h window gated by the Health EVENT's timestamp (works across skip
+  and daemon restarts). Health items take approve/skip only; approve
+  runs the obvious fix where one exists (push → set dirty, the loop
+  pushes) and never anything destructive. `revert` writes the OLD
+  content to the LIVE file and lets the normal debounce/gate/commit
+  flow pick it up — never a git rewrite, and a reverted-to secret
+  still quarantines.
+
 ## Verification
 
 ```sh

@@ -103,6 +103,15 @@ pub enum Request {
     Diff {
         path: String,
     },
+    /// Rewind a tracked file's LIVE content to an earlier stored
+    /// version; the rewind then commits like any edit (history moves
+    /// forward, never rewrites).
+    Revert {
+        path: String,
+        /// A commit from `wukong log`; default: the version before the
+        /// last change.
+        to: Option<String>,
+    },
     /// Move a tracked file between the machine and shared lanes.
     Share {
         path: String,

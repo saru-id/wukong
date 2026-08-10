@@ -30,6 +30,7 @@ const MAX_SENTINEL_BYTES: u64 = 1024 * 1024;
 /// Cap on fingerprints stored per inbox item.
 const MAX_META_FINGERPRINTS: usize = 100;
 
+mod health;
 mod packages;
 mod settings;
 
@@ -101,6 +102,8 @@ pub struct Engine {
     /// An in-flight capture snapshot: every top-level scalar pref key,
     /// held in memory only, consumed by the diff.
     capture: Option<(Instant, PrefsSnapshot)>,
+    /// Last self-check; the health pass runs at most hourly.
+    last_health: Instant,
 }
 
 /// The tracked roster and its sealed and shared subsets, as canonical
@@ -242,6 +245,7 @@ impl Engine {
             prefs_dir,
             settings_dirty: None,
             capture: None,
+            last_health: Instant::now(),
         })
     }
 
@@ -354,6 +358,7 @@ impl Engine {
         self.redetect_roots();
         self.pkg_dirty = Some(now);
         self.settings_dirty = Some(now);
+        self.check_store_integrity();
         // Other machines may have pushed to the shared lane; fold it
         // in (mirror only — live files change through `wukong sync`,
         // never behind the user's back) and reload the shared
@@ -416,6 +421,7 @@ impl Engine {
         if self.settings_dirty.is_some_and(|t| t.elapsed() >= debounce) {
             new_inbox += self.reconcile_settings();
         }
+        new_inbox += self.health_tick();
         new_inbox
     }
 
@@ -1017,6 +1023,7 @@ impl Engine {
             Request::SettingsCaptureDiff => self.capture_diff(),
             Request::Exclude { path } => self.exclude(&path),
             Request::Diff { path } => self.diff(&path),
+            Request::Revert { path, to } => self.revert(&path, to.as_deref()),
             Request::FileLog { path, limit } => self.file_log(&path, limit),
             // Push is orchestrated by the daemon loop so it can run off
             // this thread; reaching here means a wiring bug.
@@ -1182,6 +1189,9 @@ impl Engine {
         // Setting items likewise; the offered value rides in meta.
         if kind == Some(InboxKind::Setting) {
             return self.resolve_setting(id, &item.meta, resolution);
+        }
+        if kind == Some(InboxKind::Health) {
+            return self.resolve_health(id, &item.subject, resolution);
         }
         if resolution == Resolution::Seal && kind != Some(InboxKind::Quarantine) {
             return Response::Error {
@@ -1420,6 +1430,68 @@ skip keeps the change out of git"
             );
         }
         Response::Ok { message }
+    }
+
+    /// Rewind a tracked file's LIVE content to an earlier stored
+    /// version. History only moves forward: the old content is written
+    /// to the live file and then commits through the normal gated flow
+    /// — for a sealed file that means decrypt, rewrite, re-seal.
+    fn revert(&mut self, path: &str, to: Option<&str>) -> Response {
+        let live = paths::resolve_input(path);
+        if !self.tracked_live.contains(&live) {
+            return Response::Error {
+                message: format!("{} is not tracked", paths::display(&live)),
+            };
+        }
+        let lane = self.lane(&live);
+        let rel = paths::store_rel(&live);
+        let Some(rev) = to
+            .map(str::to_string)
+            .or_else(|| lane.previous_commit_for(&rel))
+        else {
+            return Response::Error {
+                message: format!(
+                    "{} has no earlier version to revert to",
+                    paths::display(&live)
+                ),
+            };
+        };
+        let mut bytes = match lane.file_at(&rev, &rel) {
+            Ok(bytes) => bytes,
+            Err(e) => return err(e),
+        };
+        if wukong_core::seal::is_sealed(&bytes) {
+            let id_store = wukong_core::seal::IdentityStore::from_config(
+                self.config.seal.identity_file.as_deref(),
+            );
+            let Ok(Some(identity)) = id_store.load() else {
+                return Response::Error {
+                    message: "sealed history needs the seal identity — `wukong seal-key import`"
+                        .to_string(),
+                };
+            };
+            match wukong_core::seal::decrypt(&identity, &bytes) {
+                Ok(plain) => bytes = plain,
+                Err(e) => return err(e),
+            }
+        }
+        if let Err(e) = write_private(&live, &bytes) {
+            return err(e);
+        }
+        soft(self.db.record(
+            EventKind::Reverted,
+            &rel.to_string_lossy(),
+            &rev[..rev.len().min(12)],
+        ));
+        // The rewrite rides the normal debounce: gate, summary, commit.
+        self.touch(live.clone());
+        Response::Ok {
+            message: format!(
+                "{} rewound to {} — the rewind commits like any edit",
+                paths::display(&live),
+                &rev[..rev.len().min(12)]
+            ),
+        }
     }
 
     /// Every restorable (rel, lane) pair: the machine branch, then

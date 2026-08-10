@@ -420,6 +420,46 @@ impl Store {
         })
     }
 
+    /// The stored bytes of one file at one revision — raw, no
+    /// trimming (this can be ciphertext).
+    pub fn file_at(&self, rev: &str, rel: &Path) -> Result<Vec<u8>, StoreError> {
+        let spec = format!("{rev}:{}", rel.to_string_lossy());
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.dir)
+            .args(["show", &spec])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .map_err(|source| StoreError::Io {
+                path: self.dir.clone(),
+                source,
+            })?;
+        if !out.status.success() {
+            return Err(StoreError::Git {
+                args: format!("show {spec}"),
+                stderr: redact_userinfo(String::from_utf8_lossy(&out.stderr).trim()),
+            });
+        }
+        Ok(out.stdout)
+    }
+
+    /// The commit BEFORE the most recent one touching a file — what
+    /// "revert" means by default.
+    pub fn previous_commit_for(&self, rel: &Path) -> Option<String> {
+        let spec = format!(":(literal){}", rel.to_string_lossy());
+        let log = self
+            .git(&["log", "-n", "2", "--format=%H", "--", &spec])
+            .ok()?;
+        log.lines().nth(1).map(str::to_string)
+    }
+
+    /// A cheap corruption probe for the health check. `Ok(())` means
+    /// git can still walk the graph.
+    pub fn fsck(&self) -> Result<(), StoreError> {
+        self.git(&["fsck", "--no-progress", "--connectivity-only"])
+            .map(drop)
+    }
+
     /// The commit history touching one stored file.
     pub fn log(&self, rel: &Path, limit: usize) -> Result<String, StoreError> {
         let spec = format!(":(literal){}", rel.to_string_lossy());

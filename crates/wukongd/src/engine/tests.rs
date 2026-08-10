@@ -1350,3 +1350,53 @@ fn shared_settings_fill_in_behind_machine_values() {
         "drift from a shared value still offers"
     );
 }
+
+#[test]
+fn revert_rewinds_live_and_commits_forward() {
+    let mut rig = rig();
+    let file = track(&mut rig, ".zshrc", "version one\n");
+    edit_and_settle(&mut rig, &file, "version two\n");
+
+    let resp = rig.engine.revert(file.to_str().unwrap(), None);
+    assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "version one\n");
+    // The rewind commits through the normal flow — history grows.
+    rig.engine.tick();
+    assert_eq!(store_content(&rig, &file).as_deref(), Some("version one\n"));
+    let rel = paths::store_rel(&file);
+    let log = rig.engine.store.log(&rel, 10).unwrap();
+    assert_eq!(log.lines().count(), 3, "{log}");
+
+    // A gated revert still gates: reverting TO a version with a secret
+    // quarantines rather than committing.
+    edit_and_settle(&mut rig, &file, &format!("token {SECRET}\n"));
+    let q = rig.engine.db.inbox_open().unwrap();
+    assert_eq!(q.len(), 1, "the secret edit quarantined");
+}
+
+#[test]
+fn health_alerts_on_stale_pushes_and_answers() {
+    let mut rig = rig();
+    rig.engine.config.remote = "ssh://nowhere/store.git".to_string();
+    rig.engine.unpushed = 3;
+    soft(
+        rig.engine
+            .db
+            .record(EventKind::PushFailed, "testbox", "no route to host"),
+    );
+    // Direct call — the hourly gate is bypassed by calling the check.
+    let new = rig.engine.check_push_health();
+    assert_eq!(new, 1);
+    let items = rig.engine.db.inbox_open().unwrap();
+    assert_eq!(items[0].subject, "push");
+    assert!(items[0].body.contains("no route to host"));
+    // Re-checking within the re-alert window stays quiet.
+    assert_eq!(rig.engine.check_push_health(), 0);
+
+    // approve queues a push; never is rejected.
+    let resp = rig.engine.resolve(items[0].id, Resolution::Never);
+    assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
+    let resp = rig.engine.resolve(items[0].id, Resolution::Approve);
+    assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
+    assert!(rig.engine.wants_push());
+}
