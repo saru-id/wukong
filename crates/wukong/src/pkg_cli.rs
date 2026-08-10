@@ -49,7 +49,7 @@ impl From<ViaArg> for Provider {
 }
 
 /// Run a provider's own CLI with output streaming to the terminal.
-fn run_tool(args: &[String]) -> anyhow::Result<()> {
+pub(crate) fn run_tool(args: &[String]) -> anyhow::Result<()> {
     let (bin, rest) = args.split_first().expect("command table is never empty");
     let status = std::process::Command::new(bin)
         .args(rest)
@@ -170,7 +170,7 @@ pub fn providers(json: bool) -> anyhow::Result<()> {
 /// The exact command that would install a missing entry — `None`
 /// where wukong can only remember it (drag-installed apps, App Store
 /// apps whose id was never captured).
-fn plan_for(e: &PkgEntry) -> Option<Vec<String>> {
+pub(crate) fn plan_for(e: &PkgEntry) -> Option<Vec<String>> {
     match e.provider {
         Provider::App => None,
         Provider::Mas => e.id.as_deref().and_then(|id| e.provider.install_args(id)),
@@ -245,7 +245,7 @@ pub fn ignore(name: &str, provider: Provider, unignore: bool) -> anyhow::Result<
     })
 }
 
-fn fetch() -> anyhow::Result<Vec<PkgEntry>> {
+pub(crate) fn fetch() -> anyhow::Result<Vec<PkgEntry>> {
     match client::call(Request::PkgList)? {
         Response::Packages { entries } => Ok(entries),
         Response::Error { message } => anyhow::bail!(message),

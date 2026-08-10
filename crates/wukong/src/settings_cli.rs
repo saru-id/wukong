@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::io::Write as _;
 use wukong_core::ipc::{CaptureChange, Request, Response, SettingEntry};
 
-fn fetch() -> anyhow::Result<(Vec<SettingEntry>, Option<String>)> {
+pub(crate) fn fetch() -> anyhow::Result<(Vec<SettingEntry>, Option<String>)> {
     match client::call(Request::SettingsList)? {
         Response::Settings {
             entries,
@@ -81,37 +81,17 @@ pub fn diff() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn sync(yes: bool) -> anyhow::Result<()> {
-    let (entries, file_dir) = fetch()?;
-    let plan: Vec<&SettingEntry> = entries
-        .iter()
-        .filter(|e| e.desired.is_some() && !e.in_sync)
-        .collect();
-    if plan.is_empty() {
-        println!("every recorded setting already matches this machine");
-        return Ok(());
-    }
-    println!("will apply {} setting(s):", plan.len());
-    for e in &plan {
-        println!(
-            "  {} {} = {}",
-            e.domain,
-            e.key,
-            e.desired.as_ref().expect("filtered")
-        );
-    }
-    if !yes && !crate::pkg_cli::confirm("proceed? [y/N] ") {
-        println!("nothing applied");
-        return Ok(());
-    }
+/// Write a plan of settings via `defaults`, then restart what needs
+/// it. Shared by `settings sync` and the all-in `wukong sync`.
+pub(crate) fn apply(plan: &[&SettingEntry], file_dir: Option<&str>) {
     let mut restarts: BTreeSet<String> = BTreeSet::new();
     let mut applied = 0;
-    for e in &plan {
+    for e in plan {
         let value = e.desired.as_ref().expect("filtered");
         let (flag, rendered) = value.defaults_args();
         // Sandboxed runs target plist FILES; real runs target domains,
         // which keeps cfprefsd coherent.
-        let target = match &file_dir {
+        let target = match file_dir {
             Some(dir) => wukong_core::settings::plist_path(std::path::Path::new(dir), &e.domain)
                 .to_string_lossy()
                 .into_owned(),
@@ -138,6 +118,32 @@ pub fn sync(yes: bool) -> anyhow::Result<()> {
             println!("restarted {process}");
         }
     }
+}
+
+pub fn sync(yes: bool) -> anyhow::Result<()> {
+    let (entries, file_dir) = fetch()?;
+    let plan: Vec<&SettingEntry> = entries
+        .iter()
+        .filter(|e| e.desired.is_some() && !e.in_sync)
+        .collect();
+    if plan.is_empty() {
+        println!("every recorded setting already matches this machine");
+        return Ok(());
+    }
+    println!("will apply {} setting(s):", plan.len());
+    for e in &plan {
+        println!(
+            "  {} {} = {}",
+            e.domain,
+            e.key,
+            e.desired.as_ref().expect("filtered")
+        );
+    }
+    if !yes && !crate::pkg_cli::confirm("proceed? [y/N] ") {
+        println!("nothing applied");
+        return Ok(());
+    }
+    apply(&plan, file_dir.as_deref());
     Ok(())
 }
 

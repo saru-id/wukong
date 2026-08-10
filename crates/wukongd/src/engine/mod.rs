@@ -777,7 +777,17 @@ impl Engine {
                 Ok(events) => Response::Events { events },
                 Err(e) => err(e),
             },
-            Request::Restore { path, force } => self.restore(path.as_deref(), force),
+            Request::Restore {
+                path,
+                force,
+                dry_run,
+            } => {
+                if dry_run {
+                    self.restore_plan()
+                } else {
+                    self.restore(path.as_deref(), force)
+                }
+            }
             Request::PkgRecord {
                 provider,
                 name,
@@ -965,6 +975,26 @@ impl Engine {
                     .to_string(),
             };
         }
+        if resolution == Resolution::Redact && kind != Some(InboxKind::Quarantine) {
+            return Response::Error {
+                message: "redact applies to quarantined secrets only".to_string(),
+            };
+        }
+        // A secret can't be waved off forever; skip holds it out of
+        // git, which is the honest version of "never".
+        if resolution == Resolution::Never && kind == Some(InboxKind::Quarantine) {
+            return Response::Error {
+                message: "a quarantine takes approve, redact, seal, or skip — \
+skip keeps the change out of git"
+                    .to_string(),
+            };
+        }
+        // Sentinel + never = exclude the path: one word, one meaning.
+        // exclude() persists it and resolves this item along with every
+        // other open offer under the path.
+        if resolution == Resolution::Never && kind == Some(InboxKind::Sentinel) {
+            return self.exclude(&paths::display(&live));
+        }
 
         // Guard at the moment of consequence: offers skip forbidden
         // names, but the denylist can grow between an offer and its
@@ -1047,7 +1077,7 @@ impl Engine {
             for item in items {
                 let live = paths::from_store_rel(Path::new(&item.subject));
                 if item.kind() == Some(InboxKind::Sentinel) && live.starts_with(&canon) {
-                    soft(self.db.inbox_resolve(item.id, Resolution::Ignore));
+                    soft(self.db.inbox_resolve(item.id, Resolution::Skip));
                 }
             }
         }
@@ -1132,6 +1162,51 @@ impl Engine {
     /// Copy stored files back to their live locations and track them —
     /// the new-machine bootstrap. Existing files that differ are
     /// skipped unless forced.
+    /// The would-do report for `wukong sync`: what restore would
+    /// create, what it would refuse to overwrite, what already
+    /// matches. Reads everything, writes nothing.
+    fn restore_plan(&self) -> Response {
+        let rels = match self.store.files() {
+            Ok(files) => files,
+            Err(e) => return err(e),
+        };
+        let (mut create, mut in_sync) = (0usize, 0usize);
+        let mut held = Vec::new();
+        for rel in rels {
+            if rel.starts_with("__wukong__") {
+                continue;
+            }
+            let Ok(stored) = std::fs::read(self.store.dir().join(&rel)) else {
+                continue;
+            };
+            let live = paths::from_store_rel(&rel);
+            if wukong_core::seal::is_sealed(&stored) {
+                // Plaintext comparison would need the key; report the
+                // sealed file as work if the live copy is absent.
+                if live.is_file() {
+                    in_sync += 1;
+                } else {
+                    create += 1;
+                }
+                continue;
+            }
+            match std::fs::read(&live) {
+                Err(_) => create += 1,
+                Ok(b) if b == stored => in_sync += 1,
+                Ok(_) => held.push(paths::display(&live)),
+            }
+        }
+        let mut message = format!("{create} to restore, {in_sync} already match");
+        if !held.is_empty() {
+            let _ = write!(
+                message,
+                "\ndiffer on this machine (restore --force overwrites):\n  {}",
+                held.join("\n  ")
+            );
+        }
+        Response::Ok { message }
+    }
+
     fn restore(&mut self, path: Option<&str>, force: bool) -> Response {
         let rels: Vec<PathBuf> = match path {
             Some(p) => vec![paths::store_rel(&paths::resolve_input(p))],

@@ -26,6 +26,11 @@ sentinels = ["~/.zshrc", "~/.zprofile", "~/.config"]
 notifications = false
 exclude = ["~/.config/wukong"]
 
+# Hermetic: this drill exercises one lane; the daemon must not detect
+# the REAL machine's package world (or fork npm at startup).
+[packages]
+enabled = false
+
 [seal]
 identity_file = "$ROOT/age.key"
 EOF
@@ -114,7 +119,7 @@ rm "$HOME/.env"
 sleep 0.5
 "$W" restore ~/.env --force > /dev/null 2>&1 || "$W" restore ~/.env > /dev/null
 check "restore decrypts the sealed file" "grep -q '$SEALTOK' '$HOME/.env'"
-check "seal-key status reports a match" "\"$W\" seal-key status | grep -q 'unlocks this store'"
+check "doctor reports the seal identity unlocks this store" "\"$W\" doctor | grep -q 'seal identity unlocks this store'"
 
 echo "=== sentinel discovery + forbidden skip"
 echo 'eval brew shellenv' > "$HOME/.zprofile"
@@ -147,10 +152,10 @@ sleep 2.5
 check "excluded subtree stays silent" "[ \"\$(noisy)\" = 0 ]"
 check "exclude persisted to config" "grep -q noisyapp '$XDG_CONFIG_HOME/wukong/config.toml'"
 
-echo "=== adopt-dotfiles"
+echo "=== adopt (dotfiles + packages, one word)"
 printf '[user]\n\tname = s\n' > "$HOME/.gitconfig"
 echo 'set -o vi' > "$HOME/.inputrc"
-"$W" adopt-dotfiles --yes > /dev/null
+"$W" adopt --yes > /dev/null
 FILES=$("$W" files)
 check "adopt tracked the found dotfiles" "echo \"\$FILES\" | grep -q gitconfig && echo \"\$FILES\" | grep -q inputrc"
 

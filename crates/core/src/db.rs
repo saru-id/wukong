@@ -444,7 +444,7 @@ mod tests {
         assert_eq!(open[0].body, "v2");
         assert_eq!(open[0].meta, "[\"fp1\"]");
 
-        assert!(db.inbox_resolve(open[0].id, Resolution::Ignore).unwrap());
+        assert!(db.inbox_resolve(open[0].id, Resolution::Skip).unwrap());
         assert_eq!(db.inbox_count().unwrap(), 0);
         // Resolved item stays resolved; a new change opens a new item.
         assert_eq!(

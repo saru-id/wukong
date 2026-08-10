@@ -176,8 +176,9 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::Char('a') if self.tab == Tab::Inbox => self.resolve(Resolution::Approve),
             KeyCode::Char('r') if self.tab == Tab::Inbox => self.resolve(Resolution::Redact),
-            KeyCode::Char('i') if self.tab == Tab::Inbox => self.resolve(Resolution::Ignore),
-            KeyCode::Char('s') if self.tab == Tab::Inbox => self.resolve(Resolution::Seal),
+            KeyCode::Char('n') if self.tab == Tab::Inbox => self.resolve(Resolution::Never),
+            KeyCode::Char('s') if self.tab == Tab::Inbox => self.resolve(Resolution::Skip),
+            KeyCode::Char('e') if self.tab == Tab::Inbox => self.resolve(Resolution::Seal),
             KeyCode::Char('x') if self.tab == Tab::Inbox => self.exclude_selected(),
             KeyCode::Char('R') => self.refresh(),
             _ => {}
@@ -554,7 +555,7 @@ impl App {
                 Some(InboxKind::Setting) => "a record · i never ask again · q quit",
                 Some(InboxKind::PackageGone) => "a drop from manifest · i keep · q quit",
                 Some(InboxKind::Sentinel) => "a track · i ignore · x exclude dir · q quit",
-                _ => "a approve · r redact · i ignore · 1-4 tabs · q quit",
+                _ => "a approve · n never · s skip · r redact · e seal · q quit",
             },
             _ => "j/k move · h/l tabs · R refresh · q quit",
         };

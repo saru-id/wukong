@@ -105,7 +105,7 @@ impl Engine {
                 soft(self.db.inbox_resolve_open(
                     InboxKind::PackageGone,
                     &pkg::subject(provider, name),
-                    Resolution::Ignore,
+                    Resolution::Skip,
                 ));
                 if baseline
                     || self.manifest.contains(provider, name)
@@ -121,7 +121,7 @@ impl Engine {
                 soft(self.db.inbox_resolve_open(
                     InboxKind::Package,
                     &pkg::subject(provider, name),
-                    Resolution::Ignore,
+                    Resolution::Skip,
                 ));
                 if baseline || !self.manifest.contains(provider, name) {
                     continue;
@@ -248,7 +248,7 @@ impl Engine {
             }
             soft(
                 self.db
-                    .inbox_resolve_open(InboxKind::Package, &subject, Resolution::Ignore),
+                    .inbox_resolve_open(InboxKind::Package, &subject, Resolution::Skip),
             );
             return Response::Ok {
                 message: format!("{name} installed, not tracked (your call)"),
@@ -356,7 +356,7 @@ impl Engine {
             soft(self.db.record(EventKind::PkgIgnored, &subject, ""));
             soft(
                 self.db
-                    .inbox_resolve_open(InboxKind::Package, &subject, Resolution::Ignore),
+                    .inbox_resolve_open(InboxKind::Package, &subject, Resolution::Skip),
             );
             self.commit_manifest(&format!("ignore {name}"));
             Response::Ok {
@@ -416,7 +416,7 @@ impl Engine {
         };
         if matches!(resolution, Resolution::Redact | Resolution::Seal) {
             return Response::Error {
-                message: "only approve or ignore applies to packages".to_string(),
+                message: "packages take approve, never, or skip".to_string(),
             };
         }
         let name = name.to_string();
@@ -443,7 +443,7 @@ impl Engine {
                 soft(self.db.record(EventKind::PkgAdopted, subject, "from inbox"));
                 self.commit_manifest(&format!("+{name}"));
             }
-            (InboxKind::Package, Resolution::Ignore) => {
+            (InboxKind::Package, Resolution::Never) => {
                 self.manifest.add_ignore(provider, &name);
                 soft(self.db.record(EventKind::PkgIgnored, subject, "from inbox"));
                 self.commit_manifest(&format!("ignore {name}"));
@@ -453,7 +453,17 @@ impl Engine {
                 soft(self.db.record(EventKind::PkgRemoved, subject, "from inbox"));
                 self.commit_manifest(&format!("-{name}"));
             }
-            _ => {} // gone + ignore: keep the manifest entry
+            (InboxKind::PackageGone, Resolution::Never) => {
+                // Gone AND never ask again: drop it and ignore it.
+                self.manifest.remove(provider, &name);
+                self.manifest.add_ignore(provider, &name);
+                soft(self.db.record(EventKind::PkgIgnored, subject, "from inbox"));
+                self.commit_manifest(&format!("drop {name} for good"));
+            }
+            // Skip: adoption offers stay un-adopted with state
+            // acknowledged; gone-entries stay in the manifest so
+            // `wukong sync` can reinstall them.
+            _ => {}
         }
         Response::Ok {
             message: format!("resolved {subject} ({})", resolution.as_str()),

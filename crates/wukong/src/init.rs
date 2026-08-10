@@ -1,13 +1,15 @@
-//! `wukong init`: make this machine ready. Detect its name, write the
-//! starter config, initialize the store repo — cloning the remote if
-//! one is given and no store exists yet, which is the whole new-machine
-//! bootstrap — install the launchd agent, and start the daemon.
-//! Idempotent: safe to run again to repair a half-set-up machine.
+//! `wukong init`: the whole lifecycle in one command. Detect the
+//! machine name, write the starter config, initialize the store repo —
+//! cloning the remote if it has one — install the launchd agent, start
+//! the daemon, and then offer the right next step: `sync` when the
+//! store already has this machine's world, `adopt` when the machine is
+//! the one bringing a world in. Idempotent: safe to run again to
+//! repair a half-set-up machine.
 
 use std::io::{self, Write as _};
 use wukong_core::{Config, Store, paths};
 
-pub fn run() -> anyhow::Result<()> {
+pub fn run(yes: bool) -> anyhow::Result<()> {
     let mut config = match Config::load() {
         Ok(Some(config)) => config,
         Ok(None) => Config::default(),
@@ -41,19 +43,17 @@ pub fn run() -> anyhow::Result<()> {
     println!("✓ config at {}", paths::display(&paths::config_file()));
 
     let store_dir = paths::store_dir();
+    let mut cloned_files = 0usize;
     if !store_dir.join(".git").exists() && !config.remote.is_empty() {
         // A remote plus no local store = a new machine joining an
         // existing store. Clone, branch off, and offer the restore.
         match Store::clone_from(&config.remote, &store_dir, &config.machine) {
             Ok(store) => {
-                let files = store.files().map_or(0, |f| f.len());
+                cloned_files = store.files().map_or(0, |f| f.len());
                 println!(
-                    "✓ cloned store from {} (branch {}, {files} file(s))",
-                    config.remote, config.machine
+                    "✓ cloned store from {} (branch {}, {} file(s))",
+                    config.remote, config.machine, cloned_files
                 );
-                if files > 0 {
-                    println!("  bring them onto this machine with:  wukong restore");
-                }
             }
             Err(e) => {
                 // Do NOT fall back to a fresh store: if the remote has
@@ -79,14 +79,39 @@ pub fn run() -> anyhow::Result<()> {
     crate::launchd::install()?;
     println!("✓ launchd agent installed and started");
 
+    // The right next step, offered here so setup is ONE command. Both
+    // paths show their full plan and take one confirmation (--yes
+    // accepts everything, for unattended installs).
+    if wait_for_daemon() {
+        if cloned_files > 0 {
+            println!("\nThe store already has this machine's world — syncing it on:");
+            crate::sync::run(yes, false)?;
+        } else if fresh {
+            println!("\nTaking in what's already on this machine:");
+            crate::adopt::run(yes)?;
+        }
+    } else {
+        println!("  note: daemon not answering yet — `wukong sync` or `wukong adopt` when it is");
+    }
+
     if fresh {
         println!("\nwukong is governing {}.", config.machine);
-        println!("Track your first file:  wukong track ~/.zshrc");
-        println!("Open the dashboard:     wukong");
+        println!("Open the dashboard:  wukong");
     } else {
         println!("\nRepair complete.");
     }
     Ok(())
+}
+
+/// The launchd agent was just kicked; give the socket a moment.
+fn wait_for_daemon() -> bool {
+    for _ in 0..25 {
+        if crate::client::connected() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    false
 }
 
 fn detect_machine() -> String {

@@ -53,6 +53,10 @@ pub enum Request {
     /// Copy stored files back to their live locations (new-machine
     /// bootstrap). No path = all stored files.
     Restore {
+        /// Report what restore WOULD do, without writing anything —
+        /// the files section of `wukong sync`'s plan.
+        #[serde(default)]
+        dry_run: bool,
         path: Option<String>,
         force: bool,
     },

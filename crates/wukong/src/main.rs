@@ -9,6 +9,7 @@ mod init;
 mod launchd;
 mod pkg_cli;
 mod settings_cli;
+mod sync;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -34,10 +35,10 @@ log in ~/.local/state/wukong. The daemon runs as a launchd agent and is \
 managed with `wukong daemon`.",
     after_help = "Run 'wukong <command> --help' for details on any command.",
     after_long_help = "EXAMPLES:\n  \
-wukong init                      set this machine up\n  \
-wukong adopt-dotfiles            find and track the usual dotfiles\n  \
-wukong install jq                brew install, remembered\n  \
+wukong init                      set this machine up, end to end\n  \
 wukong                           open the dashboard\n  \
+wukong install jq                brew install, remembered\n  \
+wukong sync                      make this machine match the store\n  \
 wukong status                    one-screen health summary"
 )]
 struct Cli {
@@ -47,18 +48,46 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Set up wukong on this machine
+    /// Set this machine up, end to end
     #[command(
-        long_about = "Set up wukong on this machine: detect the machine name, write the \
-starter config, create the mirror store repository (cloning your remote \
-if one exists — the new-machine bootstrap), install the launchd agent, \
-and start the daemon. Idempotent: run it again any time to repair a \
+        long_about = "The whole lifecycle in one command: detect the machine name, write \
+the starter config, create the mirror store repository (cloning your \
+remote if it has one), install the launchd agent, start the daemon — \
+and then offer the right next step. On a machine joining an existing \
+store that means `wukong sync` (files, packages, settings); on a fresh \
+machine it means `wukong adopt` (track the usual dotfiles, take in the \
+installed packages). Idempotent: run it again any time to repair a \
 half-configured machine."
     )]
     #[command(after_long_help = "EXAMPLES:\n  \
-wukong init                      fresh machine, prompts for the remote\n  \
-wukong restore                   then bring a cloned store's files live")]
-    Init,
+wukong init                      one command, prompts along the way\n  \
+wukong init --yes                unattended: accept every offer")]
+    Init {
+        /// Accept every offer without prompting
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Make this machine match the store: files, packages, settings
+    #[command(
+        long_about = "The convergence verb: one plan covering everything the store says \
+this machine should have — files to restore, packages to install (each \
+through its own provider), settings to apply — shown in full, executed \
+after one confirmation. Files that differ locally are listed but never \
+overwritten (that stays behind `wukong restore --force`). Also the \
+whole new-machine bootstrap, and safe to run any time."
+    )]
+    #[command(after_long_help = "EXAMPLES:\n  \
+wukong sync --dry-run            just show the plan\n  \
+wukong sync --yes                no questions asked")]
+    Sync {
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+        /// Show the plan without executing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
 
     /// Install a package and remember it in the manifest
     #[command(
@@ -157,16 +186,17 @@ wukong track ~/.zshrc ~/.gitconfig ~/.config/starship.toml")]
         sealed: bool,
     },
 
-    /// Find this machine's well-known dotfiles and track them all
+    /// Take in what's already on this machine: dotfiles and packages
     #[command(
-        long_about = "Scan a curated list of well-known single-file configs — shell startup \
-files, git config, editor and terminal configs, tool settings — track \
-everything that exists and isn't already tracked, after one \
-confirmation. Each file still passes the secret gate individually: a \
-token in your real .zshrc quarantines that one file without blocking \
-the rest. Credential files are never on the candidate list."
+        long_about = "Day-one onboarding in one word. Scans a curated list of well-known \
+single-file configs — shell startup files, git config, editor and \
+tool settings — and tracks everything that exists, then adopts every \
+package installed on request across all providers into the manifest. \
+One confirmation covers both. Each file still passes the secret gate \
+individually, and apps stay offer-driven (a used /Applications is too \
+noisy to take wholesale)."
     )]
-    AdoptDotfiles {
+    Adopt {
         /// Skip the confirmation prompt
         #[arg(long)]
         yes: bool,
@@ -240,7 +270,7 @@ review, exactly as if the file were newly tracked."
         path: String,
     },
 
-    /// Manage the seal identity (export, import, status)
+    /// Move the seal identity between machines (export, import)
     #[command(subcommand_value_name = "ACTION")]
     SealKey {
         #[command(subcommand)]
@@ -297,21 +327,26 @@ them with `wukong resolve` or from the dashboard."
     /// Resolve an inbox item
     #[command(
         long_about = "Resolve one inbox item by id. What each resolution means depends on \
-the item:\n\n\
+the item — but the vocabulary is always the same: approve says yes, \
+never is ALWAYS the permanent opt-out, skip is ALWAYS harmless.\n\n\
 Quarantined secret — approve commits the secret and remembers the \
 decision (this exact token never asks again; a rotated token does). \
-redact commits with the secret masked in the stored copy, forever; the \
-live file is never touched. ignore sets the item aside until the file \
-changes again.\n\n\
-Sentinel offer — approve starts tracking the file. ignore sets it \
-aside; it may return when the file next changes.\n\n\
-Package offer — approve adopts it into the manifest. ignore is the \
-PERMANENT opt-out: the package is never offered again."
+redact commits with the secret masked in the stored copy, forever. \
+seal moves the whole file to the ciphertext lane. skip holds the \
+change out of git. never is invalid here — a secret can't be waved \
+off forever.\n\n\
+Sentinel offer — approve starts tracking the file. never excludes the \
+path (same as `wukong exclude`). skip sets it aside; it may return \
+when the file next changes.\n\n\
+Package or setting offer — approve adopts/records it. never means \
+never offered again. skip closes the item; it won't nag until reality \
+changes again."
     )]
     #[command(after_long_help = "EXAMPLES:\n  \
 wukong inbox                     find the item id\n  \
 wukong resolve 3 approve\n  \
-wukong resolve 3 redact          commit, but mask the secret")]
+wukong resolve 3 never           don't ask about this again\n  \
+wukong resolve 3 skip            not now")]
     Resolve {
         /// Item id, as shown by `wukong inbox`
         #[arg(value_name = "ID")]
@@ -410,8 +445,6 @@ there. Anyone holding this line can read your sealed files."
     Export,
     /// Read an identity from stdin and store it on this machine
     Import,
-    /// Is the identity present, and does the recipient match?
-    Status,
 }
 
 #[derive(Subcommand)]
@@ -641,12 +674,14 @@ pub enum DaemonAction {
 enum ResolutionArg {
     /// Accept: commit the secret / track the file / adopt the package
     Approve,
-    /// Commit with the secret masked in the stored copy, forever
+    /// Quarantines only: commit with the secret masked, forever
     Redact,
-    /// Set aside (for package offers: permanently)
-    Ignore,
     /// Quarantines only: the whole file moves to the ciphertext lane
     Seal,
+    /// The permanent opt-out: exclude the path / never offer it again
+    Never,
+    /// Close the item and change nothing — always harmless
+    Skip,
 }
 
 impl From<ResolutionArg> for Resolution {
@@ -654,10 +689,27 @@ impl From<ResolutionArg> for Resolution {
         match arg {
             ResolutionArg::Approve => Resolution::Approve,
             ResolutionArg::Redact => Resolution::Redact,
-            ResolutionArg::Ignore => Resolution::Ignore,
             ResolutionArg::Seal => Resolution::Seal,
+            ResolutionArg::Never => Resolution::Never,
+            ResolutionArg::Skip => Resolution::Skip,
         }
     }
+}
+
+/// A `provider:name` spelled inline — the same spelling the inbox and
+/// event log use — beats the flags: `wukong install npm:typescript`.
+fn name_and_provider(
+    name: &str,
+    via: Option<pkg_cli::ViaArg>,
+    cask: bool,
+) -> (String, wukong_core::pkg::Provider) {
+    if via.is_none()
+        && !cask
+        && let Some((provider, bare)) = wukong_core::pkg::parse_subject(name)
+    {
+        return (bare.to_string(), provider);
+    }
+    (name.to_string(), resolve_via(via, cask))
 }
 
 /// `--via`/`--cask` to a provider: cask sugar wins over the default.
@@ -707,32 +759,6 @@ fn seal_key(action: &SealKeyAction) -> anyhow::Result<()> {
             println!("seal identity imported");
             Ok(())
         }
-        SealKeyAction::Status => {
-            let has_identity = store.load()?.is_some();
-            let recipient = std::fs::read_to_string(&recipient_path).ok();
-            println!(
-                "identity   {}",
-                if has_identity { "present" } else { "missing" }
-            );
-            match &recipient {
-                Some(r) => println!("recipient  {}", r.trim()),
-                None => println!("recipient  (none — nothing sealed yet)"),
-            }
-            if let (true, Some(r)) = (has_identity, &recipient) {
-                let identity = store.load()?.expect("checked");
-                let probe = seal::encrypt(r.trim(), b"probe")?;
-                let matches = seal::decrypt(&identity, &probe).is_ok();
-                println!(
-                    "match      {}",
-                    if matches {
-                        "identity unlocks this store"
-                    } else {
-                        "MISMATCH — this identity cannot decrypt this store"
-                    }
-                );
-            }
-            Ok(())
-        }
     }
 }
 
@@ -740,14 +766,21 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         None => tui::run(),
-        Some(Command::Init) => init::run(),
+        Some(Command::Init { yes }) => init::run(yes),
+        Some(Command::Sync { yes, dry_run }) => sync::run(yes, dry_run),
         Some(Command::Install {
             name,
             via,
             cask,
             no_track,
-        }) => pkg_cli::install(&name, resolve_via(via, cask), no_track),
-        Some(Command::Rm { name, via, cask }) => pkg_cli::rm(&name, resolve_via(via, cask)),
+        }) => {
+            let (name, provider) = name_and_provider(&name, via, cask);
+            pkg_cli::install(&name, provider, no_track)
+        }
+        Some(Command::Rm { name, via, cask }) => {
+            let (name, provider) = name_and_provider(&name, via, cask);
+            pkg_cli::rm(&name, provider)
+        }
         Some(Command::Pkg { action }) => match action {
             PkgAction::List { json } => pkg_cli::list(json),
             PkgAction::Sync { yes, dry_run } => pkg_cli::sync(yes, dry_run),
@@ -788,7 +821,7 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Seal { path }) => say(Request::Seal { path }),
         Some(Command::Unseal { path }) => say(Request::Unseal { path }),
         Some(Command::SealKey { action }) => seal_key(&action),
-        Some(Command::AdoptDotfiles { yes }) => adopt::run(yes),
+        Some(Command::Adopt { yes }) => adopt::run(yes),
         Some(Command::Exclude { path }) => say(Request::Exclude { path }),
         Some(Command::Diff { path }) => say(Request::Diff { path }),
         Some(Command::Log { path, limit }) => say(Request::FileLog { path, limit }),
@@ -801,7 +834,11 @@ fn main() -> anyhow::Result<()> {
             resolution: resolution.into(),
         }),
         Some(Command::Push) => say(Request::PushNow),
-        Some(Command::Restore { path, force }) => say(Request::Restore { path, force }),
+        Some(Command::Restore { path, force }) => say(Request::Restore {
+            path,
+            force,
+            dry_run: false,
+        }),
         Some(Command::Daemon { action }) => launchd::run(action),
         Some(Command::Uninstall { purge, yes }) => launchd::uninstall(purge, yes),
         Some(Command::Doctor) => {
@@ -955,16 +992,45 @@ fn doctor() {
     }
     check(client::connected(), "daemon running");
     check(launchd::agent_path().exists(), "launchd agent installed");
-    if client::connected()
-        && let Ok(Response::Status(s)) = client::call(Request::Status)
-    {
-        println!(
-            "\n{} tracked · {} inbox · {} unpushed · last push {}",
-            s.tracked,
-            s.inbox,
-            s.unpushed,
-            age_of(s.last_push.as_deref())
-        );
+
+    // The seal lane: identity vs the store's recipient. Silent when
+    // this machine has never touched sealing.
+    let id_store =
+        wukong_core::seal::IdentityStore::from_config(config.seal.identity_file.as_deref());
+    let identity = id_store.load().ok().flatten();
+    let recipient =
+        std::fs::read_to_string(paths::store_dir().join(wukong_core::seal::RECIPIENT_REL)).ok();
+    match (identity, recipient) {
+        (None, None) => {}
+        (Some(_), None) => check(true, "seal identity present (nothing sealed yet)"),
+        (None, Some(_)) => check(
+            false,
+            "store has sealed files but no identity here — `wukong seal-key import`",
+        ),
+        (Some(id), Some(r)) => {
+            let unlocks = wukong_core::seal::encrypt(r.trim(), b"probe")
+                .is_ok_and(|probe| wukong_core::seal::decrypt(&id, &probe).is_ok());
+            check(unlocks, "seal identity unlocks this store");
+        }
+    }
+
+    if client::connected() {
+        if let Ok(Response::Providers { entries }) = client::call(Request::PkgProviders) {
+            let active = entries.iter().filter(|e| e.active).count();
+            println!(
+                "  {active}/{} package providers active (`wukong pkg providers` for detail)",
+                entries.len()
+            );
+        }
+        if let Ok(Response::Status(s)) = client::call(Request::Status) {
+            println!(
+                "\n{} tracked · {} inbox · {} unpushed · last push {}",
+                s.tracked,
+                s.inbox,
+                s.unpushed,
+                age_of(s.last_push.as_deref())
+            );
+        }
     }
 }
 

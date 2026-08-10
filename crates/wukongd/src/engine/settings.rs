@@ -85,7 +85,7 @@ impl Engine {
                 soft(self.db.inbox_resolve_open(
                     InboxKind::Setting,
                     &format!("{domain} {key}"),
-                    Resolution::Ignore,
+                    Resolution::Skip,
                 ));
                 continue;
             }
@@ -231,7 +231,7 @@ impl Engine {
                     meta.domain, meta.key, meta.value
                 ));
             }
-            Resolution::Ignore => {
+            Resolution::Never => {
                 self.settings_manifest.add_ignore(&meta.domain, &meta.key);
                 soft(
                     self.db
@@ -239,6 +239,9 @@ impl Engine {
                 );
                 self.commit_settings_manifest(&format!("ignore {} {}", meta.domain, meta.key));
             }
+            // Skip: the item is closed, the acknowledged state already
+            // matches reality — nothing more to do, nothing promised.
+            Resolution::Skip => {}
             Resolution::Redact | Resolution::Seal => unreachable!("rejected above"),
         }
         Response::Ok {
@@ -339,7 +342,7 @@ impl Engine {
             soft(self.db.record(EventKind::SettingIgnored, &subject, ""));
             soft(
                 self.db
-                    .inbox_resolve_open(InboxKind::Setting, &subject, Resolution::Ignore),
+                    .inbox_resolve_open(InboxKind::Setting, &subject, Resolution::Skip),
             );
             self.commit_settings_manifest(&format!("ignore {subject}"));
             Response::Ok {

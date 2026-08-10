@@ -114,7 +114,7 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
 - `crates/wukongd` — the daemon: a tokio event loop over an FSEvents
   watcher, debounce and push timers, and a unix-socket server. Runs as
   a launchd LaunchAgent, idle-cheap.
-- `crates/wukong` — the CLI and ratatui TUI: `init`, `adopt-dotfiles`,
+- `crates/wukong` — the CLI and ratatui TUI: `init`, `adopt`, `sync`,
   `install`, `rm`, `pkg`, `track`, `untrack`, `exclude`, `diff`, `log`,
   `status`, `files`, `inbox`, `resolve`, `push`, `restore`, `daemon`,
   `doctor`. Bare `wukong` opens the dashboard.
@@ -131,24 +131,36 @@ cp share/man/man1/*.1 /usr/local/share/man/man1/ 2>/dev/null || true
 cp share/zsh/site-functions/_wukong ~/.zsh/completions/ 2>/dev/null || true
 ```
 
-Then `wukong init`, and the bootstrap trio: `wukong restore` for
-files, `wukong pkg sync` for software, `wukong settings sync` for
+Then `wukong init` — it clones your store, starts the daemon, and
+offers `wukong sync` itself: files, packages, and settings in one
+plan. The scoped verbs (`restore`, `pkg sync`, `settings sync`) stay
+for
 behavior. Leaving is as clean as arriving:
 `wukong uninstall` stops the daemon and removes the agent (data kept);
 `--purge` removes local data too. The remote store is never touched.
 
 ## Getting started
 
+Six words cover daily life: `init`, `wukong` (the inbox), `track`,
+`install`, `sync`, `status`. Everything else is depth you reach for.
+
 ```sh
 cargo build --release             # or grab the release tarball
-./target/release/wukong init      # config, store repo, launchd agent
-wukong adopt-dotfiles             # find + track this machine's dotfiles
+./target/release/wukong init      # the whole setup, one command
 wukong                            # the dashboard
 ```
 
-On a new machine, point `wukong init` at your existing store remote:
-it clones the store, branches for the machine, and `wukong restore`
-copies every stored file into place and tracks it.
+`init` writes the config, starts the daemon, and offers the right next
+step itself: on a fresh machine that's `wukong adopt` (track the usual
+dotfiles, take in every installed package); on a machine joining an
+existing store it's `wukong sync` (restore files, install missing
+packages, apply settings — one plan, one confirmation). `--yes`
+accepts everything, for unattended installs.
+
+Every inbox decision uses the same three words: **approve** says yes,
+**never** is always the permanent opt-out (exclude the path, never
+offer the package or setting again), **skip** is always harmless.
+Quarantined secrets add **redact** and **seal**.
 
 State lives under XDG: config in `~/.config/wukong`, the store repo and
 database in `~/.local/share/wukong`, the socket in `~/.local/state`.

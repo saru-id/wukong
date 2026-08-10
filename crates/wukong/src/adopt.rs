@@ -65,15 +65,16 @@ pub fn run(yes: bool) -> anyhow::Result<()> {
         .collect();
 
     if found.is_empty() {
-        println!("nothing new to adopt — every known dotfile is tracked or absent");
-        return Ok(());
+        println!("no new dotfiles to adopt — every known candidate is tracked or absent");
+    } else {
+        println!("found {} dotfile(s) to track:", found.len());
+        for f in &found {
+            println!("  {f}");
+        }
     }
-    println!("found {} dotfile(s) to track:", found.len());
-    for f in &found {
-        println!("  {f}");
-    }
-    if !yes && !crate::pkg_cli::confirm("track them all? [y/N] ") {
-        println!("nothing tracked");
+    println!("…and every package already installed on request gets adopted into the manifest");
+    if !yes && !crate::pkg_cli::confirm("adopt it all? [y/N] ") {
+        println!("nothing adopted");
         return Ok(());
     }
     for f in &found {
@@ -85,6 +86,10 @@ pub fn run(yes: bool) -> anyhow::Result<()> {
             Response::Error { message } => eprintln!("  skipped: {message}"),
             _ => {}
         }
+    }
+    match client::call(Request::PkgAdoptInstalled)? {
+        Response::Ok { message } | Response::Error { message } => println!("{message}"),
+        _ => {}
     }
     Ok(())
 }

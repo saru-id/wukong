@@ -101,7 +101,7 @@ mkdir -p "$ROOT/Applications/SomeTool.app"
 sleep 3
 check "app offered" "sqlite3 '$DB' \"SELECT subject FROM inbox WHERE resolved=0\" | grep -q 'app:SomeTool'"
 ID=$(sqlite3 "$DB" "SELECT id FROM inbox WHERE resolved=0 LIMIT 1")
-"$W" resolve "$ID" ignore > /dev/null
+"$W" resolve "$ID" never > /dev/null
 check "ignore recorded in manifest" "grep -q 'SomeTool' '$MANIFEST'"
 rm -rf "$ROOT/Applications/SomeTool.app"; sleep 3
 mkdir -p "$ROOT/Applications/SomeTool.app"; sleep 3
@@ -127,14 +127,14 @@ echo "=== pkg sync --dry-run speaks each provider's language"
 "$W" pkg adopt-installed > /dev/null
 rm -rf "$ROOT/npmroot/@biomejs/biome" "$ROOT/brew/Cellar/jq"
 sleep 3
-for GID in $(sqlite3 "$DB" "SELECT id FROM inbox WHERE resolved=0"); do "$W" resolve "$GID" ignore > /dev/null; done
+for GID in $(sqlite3 "$DB" "SELECT id FROM inbox WHERE resolved=0"); do "$W" resolve "$GID" skip > /dev/null; done
 PLAN=$("$W" pkg sync --dry-run)
 check "dry-run plans npm install -g" "echo \"\$PLAN\" | grep -q 'npm install -g @biomejs/biome'"
 check "dry-run plans brew install" "echo \"\$PLAN\" | grep -q 'brew install jq'"
 check "dry-run executes nothing" "[ ! -d \"$ROOT/npmroot/@biomejs/biome\" ]"
 
-echo "=== pkg list + bulk adopt"
-"$W" pkg adopt-installed > /dev/null
+echo "=== pkg list + bulk adopt (via the one-word adopt)"
+"$W" adopt --yes > /dev/null
 check "bulk adopt took baseline jq" "grep -q '\"jq\"' '$MANIFEST'"
 LIST=$("$W" pkg list)
 check "pkg list marks removed jq as missing" "echo \"$LIST\" | grep -q '^! jq'"
@@ -154,7 +154,7 @@ check "mas adoption lands in the manifest" "grep -q 'NewBuy' '$MANIFEST'"
 rm "$ROOT/gobin/fzf" "$ROOT/gemhome/specifications/colorls-1.4.6.gemspec"
 rm -rf "$ROOT/Applications/NewBuy.app"
 sleep 3
-for GID in $(sqlite3 "$DB" "SELECT id FROM inbox WHERE resolved=0"); do "$W" resolve "$GID" ignore > /dev/null; done
+for GID in $(sqlite3 "$DB" "SELECT id FROM inbox WHERE resolved=0"); do "$W" resolve "$GID" skip > /dev/null; done
 PLAN=$("$W" pkg sync --dry-run)
 check "dry-run plans go install @latest" "echo \"\$PLAN\" | grep -q 'go install github.com/junegunn/fzf@latest'"
 check "dry-run plans gem install --user-install" "echo \"\$PLAN\" | grep -q 'gem install --user-install colorls'"
@@ -172,6 +172,17 @@ echo 'export A=1' > "$HOME/.zshrc"
 "$W" track ~/.zshrc > /dev/null
 sleep 2.5
 check "dotfile flow intact" "grep -q 'export A=1' '$STORE/.zshrc'"
+
+echo "=== wukong sync: one plan for everything"
+SYNCPLAN=$("$W" sync --dry-run)
+check "sync plan has a files section" "echo \"\$SYNCPLAN\" | grep -q '^files'"
+check "sync plan counts the tracked file in sync" "echo \"\$SYNCPLAN\" | grep -q 'already match'"
+check "sync plan quotes package commands" "echo \"\$SYNCPLAN\" | grep -q 'npm install -g @biomejs/biome'"
+check "sync dry-run executes nothing" "echo \"\$SYNCPLAN\" | grep -q 'dry run'"
+
+echo "=== provider:name shorthand"
+RMOUT=$("$W" rm go:github.com/junegunn/fzf 2>&1 || true)
+check "inline provider spelling reaches the right provider" "echo \"\$RMOUT\" | grep -q 'go has no uninstall command'"
 
 echo "=== push carries the manifest"
 "$W" push > /dev/null

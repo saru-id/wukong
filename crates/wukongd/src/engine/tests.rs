@@ -256,7 +256,7 @@ fn adopt_and_permanent_ignore() {
     rig.engine.resolve(rg.id, Resolution::Approve);
     assert!(rig.engine.manifest.contains(Provider::Formula, "ripgrep"));
 
-    rig.engine.resolve(ht.id, Resolution::Ignore);
+    rig.engine.resolve(ht.id, Resolution::Never);
     assert!(rig.engine.manifest.ignored(Provider::Formula, "htop"));
     // The permanent part: uninstall and reinstall → no new offer.
     brew_uninstall(&rig, "htop");
@@ -689,7 +689,7 @@ fn settings_manifest_match_is_silent_and_ignore_is_permanent() {
     );
     assert_eq!(rig.engine.reconcile_settings(), 1);
     let item_id = rig.engine.db.inbox_open().unwrap()[0].id;
-    rig.engine.resolve(item_id, Resolution::Ignore);
+    rig.engine.resolve(item_id, Resolution::Never);
     write_pref(
         &prefs,
         "NSGlobalDomain",
@@ -1155,4 +1155,79 @@ fn expanded_providers_offer_by_receipt() {
         .find(|e| e.provider == Provider::Npm)
         .unwrap();
     assert!(!npm.active, "absent override must disable");
+}
+
+#[test]
+fn skip_is_harmless_never_is_permanent() {
+    let mut rig = pkg_rig();
+    rig.engine.reconcile(); // baseline
+    brew_install(&rig, "htop", true);
+    assert_eq!(rig.engine.reconcile(), 1);
+    let id = rig.engine.db.inbox_open().unwrap()[0].id;
+
+    // Skip: the offer closes, nothing lands anywhere permanent.
+    rig.engine.resolve(id, Resolution::Skip);
+    assert!(!rig.engine.manifest.ignored(Provider::Formula, "htop"));
+    assert!(!rig.engine.manifest.contains(Provider::Formula, "htop"));
+    assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
+    // …and it does not nag: reality is acknowledged, so no re-offer.
+    assert_eq!(rig.engine.reconcile(), 0);
+
+    // A fresh transition re-offers; never on the gone-item drops AND
+    // ignores in one move.
+    brew_uninstall(&rig, "htop");
+    rig.engine.reconcile();
+    brew_install(&rig, "htop", true);
+    assert_eq!(rig.engine.reconcile(), 1);
+    let id = rig.engine.db.inbox_open().unwrap()[0].id;
+    rig.engine.resolve(id, Resolution::Approve);
+    brew_uninstall(&rig, "htop");
+    assert_eq!(rig.engine.reconcile(), 1);
+    let gone = rig.engine.db.inbox_open().unwrap()[0].id;
+    rig.engine.resolve(gone, Resolution::Never);
+    assert!(!rig.engine.manifest.contains(Provider::Formula, "htop"));
+    assert!(rig.engine.manifest.ignored(Provider::Formula, "htop"));
+}
+
+#[test]
+fn sentinel_never_excludes_and_quarantine_rejects_never() {
+    let mut rig = rig();
+    // A sentinel change lands in the inbox…
+    let zshrc = rig.home.join(".zshrc");
+    std::fs::write(&zshrc, "export A=1\n").unwrap();
+    let rel = paths::store_rel(&zshrc).to_string_lossy().into_owned();
+    assert_eq!(rig.engine.offer_sentinel(&zshrc, &rel), 1);
+    let items = rig.engine.db.inbox_open().unwrap();
+    // …and never excludes the path: one word, the same meaning as
+    // `wukong exclude`, and the item resolves with it.
+    let resp = rig.engine.resolve(items[0].id, Resolution::Never);
+    assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
+    assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
+    assert!(
+        rig.engine.excludes.contains(&zshrc),
+        "{:?}",
+        rig.engine.excludes
+    );
+
+    // A quarantined secret cannot be waved off forever.
+    let notes = rig.home.join("notes.txt");
+    std::fs::write(&notes, "ok\n").unwrap();
+    rig.engine.track(notes.to_str().unwrap(), false);
+    std::fs::write(
+        &notes,
+        "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n",
+    )
+    .unwrap();
+    rig.engine.touch(notes.clone());
+    rig.engine.tick();
+    let q = rig
+        .engine
+        .db
+        .inbox_open()
+        .unwrap()
+        .into_iter()
+        .find(|i| i.kind() == Some(InboxKind::Quarantine))
+        .expect("quarantined");
+    let resp = rig.engine.resolve(q.id, Resolution::Never);
+    assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
 }

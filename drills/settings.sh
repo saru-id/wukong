@@ -48,6 +48,11 @@ push_interval_secs = 3600
 sentinels = ["~/.zshrc"]
 notifications = false
 
+# Hermetic: this drill exercises one lane; the daemon must not detect
+# the REAL machine's package world (or fork npm at startup).
+[packages]
+enabled = false
+
 [settings]
 enabled = true
 preferences_dir = "$PREFS"
@@ -95,7 +100,7 @@ echo "=== ignore is permanent"
 pref NSGlobalDomain KeyRepeat int 6
 sleep 3
 ID=$(sqlite3 "$DB" "SELECT id FROM inbox WHERE resolved=0 LIMIT 1")
-"$W" resolve "$ID" ignore > /dev/null
+"$W" resolve "$ID" never > /dev/null
 pref NSGlobalDomain KeyRepeat int 4
 sleep 3
 check "ignored key never re-offers" "[ \"$(inbox_count)\" = 0 ]"

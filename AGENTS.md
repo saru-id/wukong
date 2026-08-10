@@ -157,6 +157,23 @@ application that may sit nearby on disk as `../wukong-backup`).
   brew client-side and reports via PkgRecord — which also supersedes
   any pending offer for the same package.
 
+- **One vocabulary for inbox decisions: approve / never / skip.**
+  `never` is ALWAYS the permanent opt-out (sentinel: exclude the path;
+  package/setting: manifest ignore list; quarantine: INVALID — a
+  secret can't be waved off forever). `skip` is ALWAYS harmless: close
+  the item, promise nothing (a quarantined change stays held out of
+  git). Quarantines add `redact`/`seal`. Never reintroduce a
+  resolution whose blast radius depends on the item kind — that
+  ambiguity is exactly what this vocabulary replaced.
+- **`init` is the whole lifecycle; `sync` is the whole convergence.**
+  init ends by offering `sync` (store has this machine's world) or
+  `adopt` (machine brings a world in) — one command, one confirmation,
+  `--yes` for unattended runs. `wukong sync` composes restore (plan
+  via `Restore { dry_run }`), the pkg plan, and the settings plan into
+  ONE confirm; the scoped verbs stay for à la carte use. Drills that
+  exercise one lane MUST disable the others in their config (packages
+  detection would otherwise read the developer's real machine).
+
 ## Verification
 
 ```sh

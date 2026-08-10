@@ -132,22 +132,33 @@ impl InboxKind {
     }
 }
 
+/// One vocabulary for every inbox decision: `approve` says yes,
+/// `never` is ALWAYS the permanent opt-out, `skip` is ALWAYS harmless
+/// (close the item, promise nothing). The permanent one is never
+/// spelled any other way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Resolution {
     /// Quarantine: commit as-is, forever (fingerprint allowance).
     /// Sentinel: start tracking. Package: adopt into the manifest.
+    /// Setting: record it.
     Approve,
     /// Quarantine only: mask the finding in every stored copy, forever;
     /// the live file is never touched.
     Redact,
-    /// Quarantine/sentinel: drop the item; it may return when the file
-    /// next changes. Package: PERMANENT opt-out via the manifest.
-    Ignore,
     /// Quarantine only: the whole file becomes SEALED — every stored
     /// copy is age-encrypted from now on, so the remote only ever
     /// holds ciphertext.
     Seal,
+    /// The permanent opt-out. Sentinel: exclude the path. Package and
+    /// setting: never offered again (manifest ignore list). Invalid on
+    /// quarantines — a secret can't be waved off forever.
+    Never,
+    /// Close the item and change nothing. A quarantined change stays
+    /// held out of git; a sentinel offer may return when the file next
+    /// changes; a package or setting offer will not nag again until
+    /// reality changes again.
+    Skip,
 }
 
 impl Resolution {
@@ -156,8 +167,9 @@ impl Resolution {
         match self {
             Self::Approve => "approve",
             Self::Redact => "redact",
-            Self::Ignore => "ignore",
             Self::Seal => "seal",
+            Self::Never => "never",
+            Self::Skip => "skip",
         }
     }
 
@@ -166,8 +178,9 @@ impl Resolution {
         match s {
             "approve" => Some(Self::Approve),
             "redact" => Some(Self::Redact),
-            "ignore" => Some(Self::Ignore),
             "seal" => Some(Self::Seal),
+            "never" => Some(Self::Never),
+            "skip" => Some(Self::Skip),
             _ => None,
         }
     }
