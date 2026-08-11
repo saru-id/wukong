@@ -31,6 +31,28 @@ data[key] = {"bool": lambda v: v == "true", "int": int, "float": float, "str": s
 plistlib.dump(data, open(path, "wb"), fmt=plistlib.FMT_BINARY)
 PY
 }
+pref_array() { # domain key item... (writes an array of dicts with tile-type=item)
+  python3 - "$PREFS" "$@" <<'PY'
+import plistlib, sys, os
+prefs, domain, key = sys.argv[1:4]
+items = sys.argv[4:]
+name = ".GlobalPreferences.plist" if domain == "NSGlobalDomain" else f"{domain}.plist"
+path = os.path.join(prefs, name)
+data = {}
+if os.path.exists(path):
+    data = plistlib.load(open(path, "rb"))
+data[key] = [{"tile-type": i} for i in items]
+plistlib.dump(data, open(path, "wb"), fmt=plistlib.FMT_BINARY)
+PY
+}
+pref_array_len() { # domain key
+  python3 - "$PREFS" "$1" "$2" <<'PY'
+import plistlib, sys, os
+prefs, domain, key = sys.argv[1:4]
+name = ".GlobalPreferences.plist" if domain == "NSGlobalDomain" else f"{domain}.plist"
+print(len(plistlib.load(open(os.path.join(path := os.path.join(prefs, name)), "rb")).get(key, [])))
+PY
+}
 pref_read() { # domain key
   python3 - "$PREFS" "$1" "$2" <<'PY'
 import plistlib, sys, os
@@ -120,6 +142,23 @@ check "sync applied the recorded values" "[ \"\$(pref_read org.custom.tool fancy
 sleep 3
 check "post-sync reconcile is silent" "[ \"$(inbox_count)\" = 0 ]"
 check "list reports everything in sync" "\"$W\" settings diff | grep -q 'matches this machine'"
+
+echo "=== complex values: the dock's layout is a setting too"
+pref_array com.apple.dock persistent-apps app-one app-two
+sleep 3
+check "unrecorded arrays stay invisible (no noise)" "[ \"\$(inbox_count)\" = 0 ]"
+"$W" settings record com.apple.dock persistent-apps > /dev/null
+check "recorded array lands in the manifest as plist" "grep -q 'tile-type' '$MANIFEST'"
+pref_array com.apple.dock persistent-apps app-one
+sleep 3
+check "governed array drift is offered" "sqlite3 '$DB' \"SELECT subject FROM inbox WHERE resolved=0\" | grep -q 'persistent-apps'"
+ID=$(sqlite3 "$DB" "SELECT id FROM inbox WHERE resolved=0 LIMIT 1")
+"$W" resolve "$ID" skip > /dev/null
+check "settings diff shows the complex drift" "\"$W\" settings diff | grep -q 'persistent-apps'"
+"$W" settings sync --yes > /dev/null
+check "sync writes the recorded layout back" "[ \"\$(pref_array_len com.apple.dock persistent-apps)\" = 2 ]"
+sleep 3
+check "restored layout re-acknowledges silently" "[ \"\$(inbox_count)\" = 0 ]"
 
 echo "=== capture: snapshot, change, diff, record"
 "$W" settings capture --start > /dev/null

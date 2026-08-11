@@ -143,6 +143,17 @@ confirmations — not to defend against a fully hostile member.
   `settings record` governs any domain/key beyond the corpus.
 - Ignoring a setting offer is permanent, per key — fiddle with your
   mouse speed forever without being asked about it again.
+- **Layouts are settings too.** The Dock's app list, custom keyboard
+  shortcuts — complex plist values, not just scalars — record with
+  the same verb (`wukong settings record com.apple.dock
+  persistent-apps`), compare structurally, apply through `defaults`,
+  and share across machines like anything else. Set your Dock the way
+  you want it once, `settings share` it, and every machine inherits
+  it on sync. Complex keys are governed only when explicitly recorded
+  — capture and ambient discovery stay scalar, because arrays are
+  where app-state noise lives. The honest boundary stays: if
+  `defaults` can say it, wukong can govern it (login items and
+  wallpaper live behind other APIs and stay out, deliberately).
 - **Any setting, discoverable.** `wukong settings capture` snapshots
   every preference key, waits while you change the thing — System
   Settings, an app, `defaults` — then shows you exactly which keys

@@ -684,6 +684,15 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Str(String),
+    /// Any non-scalar defaults value — the Dock's `persistent-apps`
+    /// array, `symbolichotkeys` dicts. Carried as plist XML; equality
+    /// is structural, never textual. Complex keys are governed only
+    /// when explicitly recorded — capture and ambient discovery stay
+    /// scalar, because arrays and dicts are where app-state noise
+    /// lives.
+    Complex {
+        plist: String,
+    },
 }
 
 impl std::fmt::Display for Value {
@@ -693,19 +702,40 @@ impl std::fmt::Display for Value {
             Self::Int(v) => write!(f, "{v}"),
             Self::Float(v) => write!(f, "{v}"),
             Self::Str(v) => write!(f, "{v}"),
+            Self::Complex { plist } => match parse_plist_xml(plist) {
+                Some(plist::Value::Array(items)) => write!(f, "«array, {} item(s)»", items.len()),
+                Some(plist::Value::Dictionary(d)) => write!(f, "«dict, {} key(s)»", d.len()),
+                _ => write!(f, "«complex value»"),
+            },
         }
     }
 }
 
+/// Structural parse of the XML we carry; `None` never panics a
+/// display or comparison.
+fn parse_plist_xml(xml: &str) -> Option<plist::Value> {
+    plist::Value::from_reader(std::io::Cursor::new(xml.as_bytes())).ok()
+}
+
+/// The canonical XML form the manifest carries.
+fn plist_to_xml(value: &plist::Value) -> Option<String> {
+    let mut out = Vec::new();
+    plist::to_writer_xml(&mut out, value).ok()?;
+    String::from_utf8(out).ok()
+}
+
 impl Value {
-    /// The `defaults write` type flag and rendered argument.
+    /// The `defaults write` argument tail. Scalars get a type flag;
+    /// complex values ride as plist text, which `defaults` parses
+    /// natively.
     #[must_use]
-    pub fn defaults_args(&self) -> (&'static str, String) {
+    pub fn defaults_args(&self) -> Vec<String> {
         match self {
-            Self::Bool(v) => ("-bool", v.to_string()),
-            Self::Int(v) => ("-int", v.to_string()),
-            Self::Float(v) => ("-float", v.to_string()),
-            Self::Str(v) => ("-string", v.clone()),
+            Self::Bool(v) => vec!["-bool".to_string(), v.to_string()],
+            Self::Int(v) => vec!["-int".to_string(), v.to_string()],
+            Self::Float(v) => vec!["-float".to_string(), v.to_string()],
+            Self::Str(v) => vec!["-string".to_string(), v.clone()],
+            Self::Complex { plist } => vec![plist.clone()],
         }
     }
 
@@ -725,12 +755,20 @@ impl Value {
                 let bf = *b as f64;
                 (a - bf).abs() < 1e-9
             }
+            (Self::Complex { plist: a }, Self::Complex { plist: b }) => {
+                // Structural, never textual: two XML spellings of the
+                // same array must match.
+                match (parse_plist_xml(a), parse_plist_xml(b)) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => a == b,
+                }
+            }
             _ => false,
         }
     }
 
     /// Convert from a plist value; `None` for the types we do not
-    /// govern.
+    /// govern ambiently (capture and discovery stay scalar).
     #[must_use]
     pub fn from_plist(value: &plist::Value) -> Option<Self> {
         match value {
@@ -740,6 +778,14 @@ impl Value {
             plist::Value::String(v) => Some(Self::Str(v.clone())),
             _ => None,
         }
+    }
+
+    /// Convert ANY plist value — the read path for governed keys,
+    /// where an explicitly recorded array or dict is a first-class
+    /// citizen.
+    #[must_use]
+    pub fn from_plist_any(value: &plist::Value) -> Option<Self> {
+        Self::from_plist(value).or_else(|| plist_to_xml(value).map(|plist| Self::Complex { plist }))
     }
 }
 
@@ -868,7 +914,10 @@ pub fn read_current(
             continue;
         };
         for key in keys {
-            if let Some(value) = dict.get(key).and_then(Value::from_plist) {
+            // Governed keys read at full fidelity: a recorded array or
+            // dict is a first-class value here (ambient discovery and
+            // capture stay scalar elsewhere).
+            if let Some(value) = dict.get(key).and_then(Value::from_plist_any) {
                 out.insert((domain.to_string(), key.to_string()), value);
             }
         }
@@ -970,6 +1019,55 @@ pub fn is_noise_key(domain: &str, key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complex_values_are_structural_citizens() {
+        let dock = plist::Value::Array(vec![plist::Value::Dictionary({
+            let mut d = plist::Dictionary::new();
+            d.insert("tile-type".into(), plist::Value::String("file-tile".into()));
+            d
+        })]);
+        let v = Value::from_plist_any(&dock).unwrap();
+        let Value::Complex { plist } = &v else {
+            panic!("array must read as complex");
+        };
+        assert!(plist.contains("tile-type"));
+
+        // Structural equality survives XML re-spelling.
+        let respelled = Value::Complex {
+            plist: plist.replace('\n', "\n "),
+        };
+        assert!(v.matches(&respelled));
+        // …and an empty array is a different value.
+        let empty = Value::from_plist_any(&plist::Value::Array(vec![])).unwrap();
+        assert!(!v.matches(&empty));
+        assert_eq!(empty.to_string(), "«array, 0 item(s)»");
+
+        // defaults gets plist text, no type flag.
+        assert_eq!(empty.defaults_args().len(), 1);
+
+        // The manifest round-trips it (untagged serde stays
+        // unambiguous: {plist} table vs bare scalar).
+        let mut m = SettingsManifest::default();
+        m.set("com.apple.dock", "persistent-apps", v.clone());
+        m.set("com.apple.dock", "autohide", Value::Bool(true));
+        let toml_text = toml::to_string_pretty(&m).unwrap();
+        let back: SettingsManifest = toml::from_str(&toml_text).unwrap();
+        assert_eq!(back.desired("com.apple.dock", "persistent-apps"), Some(&v));
+        assert_eq!(
+            back.desired("com.apple.dock", "autohide"),
+            Some(&Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn ambient_paths_stay_scalar() {
+        let arr = plist::Value::Array(vec![]);
+        assert!(
+            Value::from_plist(&arr).is_none(),
+            "capture must not see arrays"
+        );
+    }
 
     #[test]
     fn read_all_sees_every_domain_and_only_scalars() {
@@ -1093,7 +1191,13 @@ mod tests {
         ]
         .into();
         let current = read_current(&prefs, &wanted);
-        assert_eq!(current.len(), 2);
+        // Governed keys read at FULL fidelity: the array arrives as a
+        // complex value (absent keys stay absent).
+        assert_eq!(current.len(), 3);
+        assert!(matches!(
+            current[&("com.apple.dock".to_string(), "ignored-array".to_string())],
+            Value::Complex { .. }
+        ));
         assert!(
             current[&("com.apple.dock".to_string(), "autohide".to_string())]
                 .matches(&Value::Bool(true))

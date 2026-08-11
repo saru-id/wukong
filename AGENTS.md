@@ -142,7 +142,12 @@ application that may sit nearby on disk as `../wukong-backup`).
   matches the manifest's desired value acknowledges silently AND
   auto-resolves any stale offer. Bool/Int coercion and float epsilon
   live in `settings::Value::matches` — compare with it, never with
-  `==`. The corpus (crates/core/src/settings.rs) carries label and
+  `==`. Complex values (`Value::Complex { plist }`, XML) compare
+  STRUCTURALLY via parsed plists; they enter only through explicit
+  `settings record` (from_plist_any on the governed read path) —
+  capture and ambient discovery stay scalar (from_plist), or arrays
+  of app-state noise would drown the inbox. Apply passes plist text
+  to `defaults write`, no type flag. The corpus (crates/core/src/settings.rs) carries label and
   restart knowledge only; desired values live in the manifest.
 - **Capture is bounded and one-shot.** The snapshot lives only in
   daemon memory, expires after 10 minutes, and is consumed by the

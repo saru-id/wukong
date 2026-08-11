@@ -1596,3 +1596,57 @@ fn overwrites_archive_the_previous_content() {
         .any(|e| std::fs::read_to_string(e.path()).is_ok_and(|c| c == "precious uncommitted\n"));
     assert!(saved, "overwritten content must be archived");
 }
+
+#[test]
+fn complex_settings_record_and_govern() {
+    let (mut rig, prefs) = settings_rig();
+    let one_app = plist::Value::Array(vec![plist::Value::Dictionary({
+        let mut d = plist::Dictionary::new();
+        d.insert("tile-type".into(), plist::Value::String("file-tile".into()));
+        d
+    })]);
+    write_pref(&prefs, "com.apple.dock", "persistent-apps", one_app);
+    rig.engine.reconcile_settings(); // baseline (scalar-only: no offer for the array)
+    assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
+
+    // Explicit record takes the array at full fidelity.
+    let resp = rig
+        .engine
+        .settings_record("com.apple.dock", "persistent-apps");
+    assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
+    let desired = rig
+        .engine
+        .settings_manifest
+        .desired("com.apple.dock", "persistent-apps")
+        .unwrap()
+        .clone();
+    assert!(matches!(
+        &desired,
+        wukong_core::settings::Value::Complex { .. }
+    ));
+
+    // Drift (the dock emptied) now offers like any governed setting…
+    write_pref(
+        &prefs,
+        "com.apple.dock",
+        "persistent-apps",
+        plist::Value::Array(vec![]),
+    );
+    assert_eq!(rig.engine.reconcile_settings(), 1);
+    let item = &rig.engine.db.inbox_open().unwrap()[0];
+    assert!(item.body.contains("array"), "{}", item.body);
+
+    // …and returning to the recorded value resolves it silently.
+    let Response::Ok { .. } = rig.engine.resolve(item.id, Resolution::Skip) else {
+        panic!("skip failed");
+    };
+    let recorded_xml = match &desired {
+        wukong_core::settings::Value::Complex { plist } => plist.clone(),
+        _ => unreachable!(),
+    };
+    let restored: plist::Value =
+        plist::Value::from_reader(std::io::Cursor::new(recorded_xml.as_bytes())).unwrap();
+    write_pref(&prefs, "com.apple.dock", "persistent-apps", restored);
+    assert_eq!(rig.engine.reconcile_settings(), 0);
+    assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
+}

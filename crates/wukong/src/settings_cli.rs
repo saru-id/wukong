@@ -88,7 +88,6 @@ pub(crate) fn apply(plan: &[&SettingEntry], file_dir: Option<&str>) {
     let mut applied = 0;
     for e in plan {
         let value = e.desired.as_ref().expect("filtered");
-        let (flag, rendered) = value.defaults_args();
         // Sandboxed runs target plist FILES; real runs target domains,
         // which keeps cfprefsd coherent.
         let target = match file_dir {
@@ -98,7 +97,8 @@ pub(crate) fn apply(plan: &[&SettingEntry], file_dir: Option<&str>) {
             None => e.domain.clone(),
         };
         let ok = std::process::Command::new("defaults")
-            .args(["write", &target, &e.key, flag, &rendered])
+            .args(["write", &target, &e.key])
+            .args(value.defaults_args())
             .status()
             .is_ok_and(|s| s.success());
         if ok {
