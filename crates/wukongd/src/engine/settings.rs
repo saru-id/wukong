@@ -272,7 +272,15 @@ impl Engine {
                 };
                 SettingEntry {
                     label: known.map(|k| k.label.to_string()),
-                    restart: known.and_then(|k| k.restart).map(str::to_string),
+                    restart: known
+                        .and_then(|k| k.restart)
+                        .map(str::to_string)
+                        .or_else(|| {
+                            self.settings_manifest
+                                .restart_of(&domain, &key)
+                                .or_else(|| self.shared_settings.restart_of(&domain, &key))
+                                .map(str::to_string)
+                        }),
                     domain,
                     key,
                     desired,
@@ -294,7 +302,12 @@ impl Engine {
 
     /// Record a setting's current live value as desired — the explicit
     /// path for keys outside the corpus (or ahead of the watcher).
-    pub(super) fn settings_record(&mut self, domain: &str, key: &str) -> Response {
+    pub(super) fn settings_record(
+        &mut self,
+        domain: &str,
+        key: &str,
+        restart: Option<&str>,
+    ) -> Response {
         let Some(prefs_dir) = self.prefs_dir.clone() else {
             return Response::Error {
                 message: "settings governance is disabled in config".to_string(),
@@ -311,6 +324,19 @@ impl Engine {
         let json = serde_json::to_string(&value).unwrap_or_default();
         soft(self.db.settings_state_set(domain, key, &json));
         self.settings_manifest.set(domain, key, value.clone());
+        // Restart knowledge, best-effort: explicit flag beats the
+        // corpus beats domain inference. Corpus keys carry their own;
+        // only strays need a stored hint.
+        let hint = restart.map(str::to_string).or_else(|| {
+            if settings::known(domain, key).is_some() {
+                None
+            } else {
+                settings::restart_for_domain(domain).map(str::to_string)
+            }
+        });
+        if let Some(process) = hint {
+            self.settings_manifest.set_restart(domain, key, &process);
+        }
         let subject = format!("{domain} {key}");
         soft(
             self.db
@@ -374,8 +400,15 @@ impl Engine {
                     message: format!("{subject} is not in the shared lane"),
                 };
             };
+            let hint = self
+                .shared_settings
+                .restart_of(domain, key)
+                .map(str::to_string);
             self.shared_settings.remove(domain, key);
             self.settings_manifest.set(domain, key, value);
+            if let Some(process) = hint {
+                self.settings_manifest.set_restart(domain, key, &process);
+            }
             self.commit_settings_manifest(&format!("{subject} joins the machine lane"));
             self.commit_shared_settings(&format!("{subject} moved to the machine lane"));
         } else {
@@ -386,8 +419,15 @@ impl Engine {
                     ),
                 };
             };
+            let hint = self
+                .settings_manifest
+                .restart_of(domain, key)
+                .map(str::to_string);
             self.settings_manifest.remove(domain, key);
             self.shared_settings.set(domain, key, value);
+            if let Some(process) = hint {
+                self.shared_settings.set_restart(domain, key, &process);
+            }
             self.commit_shared_settings(&format!("{subject} joins the shared lane"));
             self.commit_settings_manifest(&format!("{subject} moved to the shared lane"));
         }

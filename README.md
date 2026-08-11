@@ -151,7 +151,10 @@ confirmations — not to defend against a fully hostile member.
   you want it once, `settings share` it, and every machine inherits
   it on sync. Complex keys are governed only when explicitly recorded
   — capture and ambient discovery stay scalar, because arrays are
-  where app-state noise lives. The honest boundary stays: if
+  where app-state noise lives. Recorded strays carry restart
+  knowledge too: inferred from the domain (WindowManager and Dock
+  settings bounce the Dock), overridable with `--restart`, so a
+  synced setting takes effect without waiting for a relogin. The honest boundary stays: if
   `defaults` can say it, wukong can govern it (login items and
   wallpaper live behind other APIs and stay out, deliberately).
 - **Any setting, discoverable.** `wukong settings capture` snapshots

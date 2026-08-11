@@ -149,6 +149,7 @@ sleep 3
 check "unrecorded arrays stay invisible (no noise)" "[ \"\$(inbox_count)\" = 0 ]"
 "$W" settings record com.apple.dock persistent-apps > /dev/null
 check "recorded array lands in the manifest as plist" "grep -q 'tile-type' '$MANIFEST'"
+check "restart hint inferred for the stray domain" "grep -A3 'restarts' '$MANIFEST' | grep -q 'Dock' || grep -q 'persistent-apps = \"Dock\"' '$MANIFEST'"
 pref_array com.apple.dock persistent-apps app-one
 sleep 3
 check "governed array drift is offered" "sqlite3 '$DB' \"SELECT subject FROM inbox WHERE resolved=0\" | grep -q 'persistent-apps'"

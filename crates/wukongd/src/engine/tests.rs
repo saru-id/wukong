@@ -715,7 +715,9 @@ fn settings_record_takes_arbitrary_keys_and_list_reports_drift() {
         "fancyMode",
         plist::Value::String("on".into()),
     );
-    let resp = rig.engine.settings_record("org.custom.tool", "fancyMode");
+    let resp = rig
+        .engine
+        .settings_record("org.custom.tool", "fancyMode", None);
     assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
 
     // Drift: live changes away from the recorded value.
@@ -741,7 +743,9 @@ fn settings_record_takes_arbitrary_keys_and_list_reports_drift() {
             .any(|e| e.domain == "com.apple.dock" && e.label.is_some())
     );
     // Recording an unset key is refused with a real message.
-    let resp = rig.engine.settings_record("org.custom.tool", "absent");
+    let resp = rig
+        .engine
+        .settings_record("org.custom.tool", "absent", None);
     assert!(matches!(resp, Response::Error { .. }));
 }
 
@@ -817,7 +821,9 @@ fn capture_then_record_makes_the_key_governed() {
     assert_eq!(changes.len(), 1);
 
     // Record it, exactly as the interactive picker would.
-    let resp = rig.engine.settings_record("org.custom.tool", "fancyMode");
+    let resp = rig
+        .engine
+        .settings_record("org.custom.tool", "fancyMode", None);
     assert!(matches!(resp, Response::Ok { .. }));
     // Governed from now on: a later change offers ambiently.
     write_pref(
@@ -1317,7 +1323,9 @@ fn shared_settings_fill_in_behind_machine_values() {
         plist::Value::Boolean(true),
     );
     rig.engine.reconcile_settings(); // baseline
-    let resp = rig.engine.settings_record("com.apple.dock", "autohide");
+    let resp = rig
+        .engine
+        .settings_record("com.apple.dock", "autohide", None);
     assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
 
     // Promote to shared: the machine manifest empties, the union
@@ -1612,7 +1620,7 @@ fn complex_settings_record_and_govern() {
     // Explicit record takes the array at full fidelity.
     let resp = rig
         .engine
-        .settings_record("com.apple.dock", "persistent-apps");
+        .settings_record("com.apple.dock", "persistent-apps", None);
     assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
     let desired = rig
         .engine
@@ -1649,4 +1657,58 @@ fn complex_settings_record_and_govern() {
     write_pref(&prefs, "com.apple.dock", "persistent-apps", restored);
     assert_eq!(rig.engine.reconcile_settings(), 0);
     assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
+}
+
+#[test]
+fn recorded_strays_carry_restart_hints() {
+    let (mut rig, prefs) = settings_rig();
+    write_pref(
+        &prefs,
+        "com.apple.WindowManager",
+        "StandardHideWidgets",
+        plist::Value::Boolean(true),
+    );
+    rig.engine.reconcile_settings();
+    rig.engine
+        .settings_record("com.apple.WindowManager", "StandardHideWidgets", None);
+    // Inferred from the domain: WindowManager settings bounce the Dock.
+    assert_eq!(
+        rig.engine
+            .settings_manifest
+            .restart_of("com.apple.WindowManager", "StandardHideWidgets"),
+        Some("Dock")
+    );
+    // An explicit override beats inference; corpus keys need no hint.
+    write_pref(
+        &prefs,
+        "org.custom.tool",
+        "mode",
+        plist::Value::Boolean(true),
+    );
+    rig.engine
+        .settings_record("org.custom.tool", "mode", Some("CustomTool"));
+    assert_eq!(
+        rig.engine
+            .settings_manifest
+            .restart_of("org.custom.tool", "mode"),
+        Some("CustomTool")
+    );
+    // The hint rides a lane move.
+    rig.engine
+        .setting_share("com.apple.WindowManager", "StandardHideWidgets", false);
+    assert_eq!(
+        rig.engine
+            .shared_settings
+            .restart_of("com.apple.WindowManager", "StandardHideWidgets"),
+        Some("Dock")
+    );
+    // And the list view surfaces it for sync's killall set.
+    let Response::Settings { entries, .. } = rig.engine.settings_list() else {
+        panic!("expected settings list");
+    };
+    let entry = entries
+        .iter()
+        .find(|e| e.key == "StandardHideWidgets")
+        .unwrap();
+    assert_eq!(entry.restart.as_deref(), Some("Dock"));
 }

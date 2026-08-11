@@ -789,6 +789,19 @@ impl Value {
     }
 }
 
+/// The process a domain's changes usually need restarted — restart
+/// inference for keys outside the corpus, best-effort and overridable
+/// at record time.
+#[must_use]
+pub fn restart_for_domain(domain: &str) -> Option<&'static str> {
+    match domain {
+        "com.apple.dock" | "com.apple.WindowManager" => Some("Dock"),
+        "com.apple.finder" => Some("Finder"),
+        "com.apple.SystemUIServer" | "com.apple.controlcenter" => Some("SystemUIServer"),
+        _ => None,
+    }
+}
+
 /// Desired state, synced through the store like everything else.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -797,6 +810,11 @@ pub struct SettingsManifest {
     pub settings: BTreeMap<String, BTreeMap<String, Value>>,
     /// domain → keys never offered again.
     pub ignore: BTreeMap<String, BTreeSet<String>>,
+    /// domain → key → process to restart after applying — restart
+    /// knowledge for keys the corpus doesn't carry, recorded (or
+    /// inferred from the domain) at record time.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub restarts: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl SettingsManifest {
@@ -855,9 +873,30 @@ impl SettingsManifest {
 
     /// Drop a recorded value (a lane move, not an opt-out).
     pub fn remove(&mut self, domain: &str, key: &str) -> bool {
+        if let Some(keys) = self.restarts.get_mut(domain) {
+            keys.remove(key);
+            if keys.is_empty() {
+                self.restarts.remove(domain);
+            }
+        }
         self.settings
             .get_mut(domain)
             .is_some_and(|keys| keys.remove(key).is_some())
+    }
+
+    pub fn set_restart(&mut self, domain: &str, key: &str, process: &str) {
+        self.restarts
+            .entry(domain.to_string())
+            .or_default()
+            .insert(key.to_string(), process.to_string());
+    }
+
+    #[must_use]
+    pub fn restart_of(&self, domain: &str, key: &str) -> Option<&str> {
+        self.restarts
+            .get(domain)
+            .and_then(|keys| keys.get(key))
+            .map(String::as_str)
     }
 
     pub fn remove_ignore(&mut self, domain: &str, key: &str) -> bool {

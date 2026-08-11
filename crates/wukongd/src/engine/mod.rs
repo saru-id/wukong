@@ -1235,7 +1235,11 @@ machine that holds the identity (and push)"
             Request::Seal { path } => self.seal(&path),
             Request::Unseal { path } => self.unseal(&path),
             Request::SettingsList => self.settings_list(),
-            Request::SettingsRecord { domain, key } => self.settings_record(&domain, &key),
+            Request::SettingsRecord {
+                domain,
+                key,
+                restart,
+            } => self.settings_record(&domain, &key, restart.as_deref()),
             Request::SettingsIgnore {
                 domain,
                 key,

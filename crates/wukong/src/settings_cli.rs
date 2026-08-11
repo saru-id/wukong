@@ -147,10 +147,11 @@ pub fn sync(yes: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn record(domain: &str, key: &str) -> anyhow::Result<()> {
+pub fn record(domain: &str, key: &str, restart: Option<String>) -> anyhow::Result<()> {
     crate::say(Request::SettingsRecord {
         domain: domain.to_string(),
         key: key.to_string(),
+        restart,
     })
 }
 
@@ -217,6 +218,7 @@ pub fn capture(phase: &CapturePhase, all: bool, json: bool) -> anyhow::Result<()
         match client::call(Request::SettingsRecord {
             domain: c.domain.clone(),
             key: c.key.clone(),
+            restart: None,
         })? {
             Response::Ok { message } => println!("{message}"),
             Response::Error { message } => eprintln!("  skipped: {message}"),

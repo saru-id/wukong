@@ -156,6 +156,10 @@ pub enum Request {
     SettingsRecord {
         domain: String,
         key: String,
+        /// Process to restart after applying (overrides corpus and
+        /// domain inference).
+        #[serde(default)]
+        restart: Option<String>,
     },
     /// Never offer this setting again (or allow it again).
     SettingsIgnore {

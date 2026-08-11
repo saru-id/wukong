@@ -661,6 +661,10 @@ wukong settings record NSGlobalDomain KeyRepeat")]
         domain: String,
         #[arg(value_name = "KEY")]
         key: String,
+        /// Process to restart after applying (inferred from the
+        /// domain when omitted — Dock, Finder, `SystemUIServer`)
+        #[arg(long, value_name = "PROCESS")]
+        restart: Option<String>,
     },
     /// Never offer this setting again
     Ignore {
@@ -1066,7 +1070,11 @@ fn run_settings(action: SettingsAction) -> anyhow::Result<()> {
             };
             settings_cli::capture(&phase, all, json)
         }
-        SettingsAction::Record { domain, key } => settings_cli::record(&domain, &key),
+        SettingsAction::Record {
+            domain,
+            key,
+            restart,
+        } => settings_cli::record(&domain, &key, restart),
         SettingsAction::Ignore { domain, key } => settings_cli::ignore(&domain, &key, false),
         SettingsAction::Unignore { domain, key } => settings_cli::ignore(&domain, &key, true),
     }
