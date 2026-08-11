@@ -143,17 +143,34 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
   `status`, `files`, `inbox`, `resolve`, `push`, `restore`, `daemon`,
   `doctor`. Bare `wukong` opens the dashboard.
 
-## Install from a release
+## Install
 
-Each release ships `wukong-vX.Y.Z-aarch64-apple-darwin.tar.gz`
-containing the binaries, man pages, and zsh completions:
+One paste on a clean Mac — no git, no brew, no anything required
+(the installer triggers the Command Line Tools install itself,
+verifies the release checksum, and wires up PATH, man pages, and
+completions):
 
 ```sh
-tar xzf wukong-v*.tar.gz && cd wukong-v*/
-install -m 755 wukong wukongd ~/.local/bin/
-cp share/man/man1/*.1 /usr/local/share/man/man1/ 2>/dev/null || true
-cp share/zsh/site-functions/_wukong ~/.zsh/completions/ 2>/dev/null || true
+curl -fsSL https://raw.githubusercontent.com/saru-id/wukong/main/install.sh | sh
 ```
+
+Then one command sets the whole machine up — including a guided SSH
+key setup when the store remote isn't reachable yet:
+
+```sh
+wukong init
+```
+
+Staying current is a decision, never a background surprise:
+
+```sh
+wukong update
+```
+
+Each release ships `wukong-vX.Y.Z-aarch64-apple-darwin.tar.gz`
+(binaries, man pages, zsh completions) with a sha256 beside it, and
+the release pipeline runs the full day-one rehearsal against the
+exact tarball before attaching it.
 
 Then `wukong init` — it clones your store, starts the daemon, and
 offers `wukong sync` itself: files, packages, and settings in one

@@ -24,11 +24,17 @@ pub fn run(yes: bool) -> anyhow::Result<()> {
     if config.remote.is_empty() {
         config.remote = prompt("Store remote (git URL; press Enter for local-only): ");
         remote_added = !config.remote.is_empty();
-        if remote_added && !remote_reachable(&config.remote) {
+    }
+    if !config.remote.is_empty() && !remote_reachable(&config.remote) {
+        if yes {
+            // Unattended runs can't wait on a browser; keep the remote
+            // and let pushes retry.
             println!(
                 "  note: could not reach {} right now — keeping it; pushes will retry",
                 config.remote
             );
+        } else {
+            ssh_wizard(&config.remote);
         }
     }
     if fresh {
@@ -159,6 +165,76 @@ fn remote_reachable(remote: &str) -> bool {
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .is_ok_and(|o| o.status.success())
+}
+
+/// A clean Mac has no way to reach a private git remote yet. Guide
+/// the whole path here — find or create an SSH key, hand over the
+/// public half, re-probe — instead of failing with a git error and
+/// homework.
+fn ssh_wizard(remote: &str) {
+    println!("  {remote} is not reachable from this machine yet.");
+    let ssh_dir = paths::home().join(".ssh");
+    let pubkey = ["id_ed25519.pub", "id_rsa.pub", "id_ecdsa.pub"]
+        .iter()
+        .map(|name| ssh_dir.join(name))
+        .find(|p| p.is_file());
+    let pubkey = pubkey.or_else(|| {
+        let answer = prompt("  No SSH key found — generate one for this machine? [Y/n] ");
+        if answer.eq_ignore_ascii_case("n") {
+            return None;
+        }
+        let key = ssh_dir.join("id_ed25519");
+        let made = std::process::Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-f"])
+            .arg(&key)
+            .arg("-C")
+            .arg(format!("{}@wukong", detect_machine()))
+            .stdout(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        made.then(|| key.with_extension("pub"))
+    });
+    let Some(pubkey) = pubkey else {
+        println!("  keeping the remote; pushes will retry once access works");
+        return;
+    };
+    if let Ok(key_line) = std::fs::read_to_string(&pubkey) {
+        println!(
+            "
+  This machine's public key:
+
+    {}",
+            key_line.trim()
+        );
+        if remote.contains("github.com") {
+            println!(
+                "
+  Add it at: https://github.com/settings/keys"
+            );
+        } else {
+            println!(
+                "
+  Add it to your git host's authorized keys."
+            );
+        }
+    }
+    for attempt in 0..3 {
+        let answer = prompt(
+            "
+  Press Enter once added (or type skip): ",
+        );
+        if answer.eq_ignore_ascii_case("skip") {
+            break;
+        }
+        if remote_reachable(remote) {
+            println!("  ✓ remote reachable");
+            return;
+        }
+        if attempt < 2 {
+            println!("  still unreachable — keys can take a few seconds to activate");
+        }
+    }
+    println!("  keeping the remote; pushes will retry once access works");
 }
 
 fn prompt(message: &str) -> String {

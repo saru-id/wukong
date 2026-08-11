@@ -17,6 +17,7 @@ drill:
 	bash drills/settings.sh
 	bash drills/shared.sh
 	bash drills/dayone.sh
+	bash drills/install.sh
 
 audit:
 	cargo audit

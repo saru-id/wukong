@@ -11,6 +11,7 @@ mod pkg_cli;
 mod settings_cli;
 mod sync;
 mod tui;
+mod update;
 
 use clap::{Parser, Subcommand};
 use wukong_core::events::Resolution;
@@ -462,6 +463,19 @@ wukong uninstall --purge         remove local data too (confirms first)")]
         /// Skip the confirmation prompt (with --purge)
         #[arg(long)]
         yes: bool,
+    },
+
+    /// Update wukong to the latest release
+    #[command(
+        long_about = "Fetch the latest release from GitHub, verify its checksum, swap the \
+binaries in place, and restart the daemon onto the new version. Manual \
+on purpose: wukong never phones home — updating is a decision you \
+make, not a background surprise. `--check` only reports."
+    )]
+    Update {
+        /// Report whether an update exists, without installing it
+        #[arg(long)]
+        check: bool,
     },
 
     /// Check the health of the whole setup
@@ -960,6 +974,7 @@ fn main() -> anyhow::Result<()> {
         }),
         Some(Command::Daemon { action }) => launchd::run(action),
         Some(Command::Uninstall { purge, yes }) => launchd::uninstall(purge, yes),
+        Some(Command::Update { check }) => update::run(check),
         Some(Command::Doctor { deep }) => {
             doctor();
             if deep {

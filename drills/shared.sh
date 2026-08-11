@@ -17,6 +17,14 @@ ok()   { pass=$((pass+1)); echo "  PASS  $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL  $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi }
 
+wait_daemon() { # up to 15s for the socket to answer
+  for _ in $(seq 1 50); do
+    "$W" status > /dev/null 2>&1 && return 0
+    sleep 0.3
+  done
+  return 1
+}
+
 env_for() { # machine name
   export HOME="$ROOT/$1/home"
   export XDG_CONFIG_HOME="$HOME/.config"
@@ -56,7 +64,7 @@ mkdir -p "$ROOT/a/brew/Cellar/jq/1.7"
 echo '{"installed_on_request":true}' > "$ROOT/a/brew/Cellar/jq/1.7/INSTALL_RECEIPT.json"
 "$BIN/wukongd" > "$ROOT/a-daemon.log" 2>&1 &
 APID=$!
-sleep 1.5
+wait_daemon || echo "  WARN  daemon A slow to answer"
 STORE_A="$XDG_DATA_HOME/wukong/store"
 SHARED_A="$XDG_DATA_HOME/wukong/shared"
 check "shared worktree exists beside the store" "[ -e '$SHARED_A/.git' ]"
@@ -95,7 +103,7 @@ CROOT=$(git -C "$STORE_B" commit-tree "$EMPTY" -m "machine root")
 git -C "$STORE_B" checkout -q -B sandbox-b "$CROOT"
 "$BIN/wukongd" > "$ROOT/b-daemon.log" 2>&1 &
 BPID=$!
-sleep 1.5
+wait_daemon || echo "  WARN  daemon B slow to answer"
 check "B's shared worktree tracks origin" "grep -q 'a2' '$SHARED_B/.gitconfig'"
 
 PLAN=$("$W" sync --dry-run)
