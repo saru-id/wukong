@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/core", "crates/wukongd", "crates/wukong"]
 
 [workspace.package]
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
 publish = false
 rust-version = "1.97"
@@ -41,6 +41,7 @@ tokio = { version = "1", features = [
 toml = "1"
 toml_edit = "0.25"
 proptest = "1"
+rpassword = "7"
 tempfile = "3"
 
 [workspace.lints.rust]
