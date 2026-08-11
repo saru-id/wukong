@@ -80,6 +80,10 @@ printf '[user]\n\tname = a2\n' > "$HOME/.gitconfig"
 sleep 2.5
 check "edits now commit to the shared branch" "grep -q 'a2' '$SHARED_A/.gitconfig'"
 
+mkdir -p "$HOME/Library/LaunchAgents"
+printf '<plist/>' > "$HOME/Library/LaunchAgents/planted.plist"
+"$W" track --shared "$HOME/Library/LaunchAgents/planted.plist" > /dev/null
+sleep 2.5
 "$W" pkg adopt-installed > /dev/null
 "$W" pkg share jq > /dev/null
 check "package moved to the shared manifest" "grep -q jq '$SHARED_A/__wukong__/packages.toml' && ! grep -q '\"jq\"' '$STORE_A/__wukong__/packages.toml'"
@@ -107,7 +111,7 @@ wait_daemon || echo "  WARN  daemon B slow to answer"
 check "B's shared worktree tracks origin" "grep -q 'a2' '$SHARED_B/.gitconfig'"
 
 PLAN=$("$W" sync --dry-run)
-check "sync plan restores the shared file" "echo \"$PLAN\" | grep -q '1 to restore'"
+check "sync plan names the shared file" "echo \"$PLAN\" | grep -q gitconfig"
 check "sync plan installs the shared package" "echo \"$PLAN\" | grep -q 'brew install jq'"
 
 "$W" restore > /dev/null 2>&1
@@ -119,6 +123,14 @@ sleep 2.5
 check "B's edit lands on the shared branch" "grep -q 'name = b' '$SHARED_B/.gitconfig'"
 "$W" push > /dev/null
 check "remote shared carries B's edit" "git -C '$ROOT/remote.git' show shared:.gitconfig | grep -q 'name = b'"
+
+echo "=== the fleet view"
+"$W" machines > "$ROOT/machines.log"
+check "machines lists both sandboxes and the lane" "grep -q 'sandbox-a' \"$ROOT/machines.log\" && grep -q 'sandbox-b' \"$ROOT/machines.log\" && grep -q 'shared lane' \"$ROOT/machines.log\""
+check "this machine is starred" "grep 'sandbox-b' \"$ROOT/machines.log\" | grep -q '^\*'"
+"$W" machines forget sandbox-a --yes > /dev/null
+check "a retired machine's branch is gone" "! git -C '$ROOT/remote.git' rev-parse --verify -q sandbox-a > /dev/null"
+check "the shared lane survived the forgetting" "git -C '$ROOT/remote.git' rev-parse --verify -q shared > /dev/null"
 
 kill $BPID 2>/dev/null
 echo

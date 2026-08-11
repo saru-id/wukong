@@ -105,9 +105,29 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
 - **The machine always wins.** A machine-lane file, package entry, or
   setting shadows its shared counterpart — per-machine variance
   without a template language. Where two machines edit the same
-  shared file, the latest commit wins, and remote shared updates only
-  ever touch the mirror: live files change through `wukong sync`,
-  never behind your back.
+  shared file, the latest commit wins.
+- **Arrivals knock; they don't let themselves in.** When another
+  machine pushes to the shared lane, an inbox item names every
+  arrival — files with ⚠ flags on dangerous paths, package changes —
+  and approve applies the file changes on the spot (conservatively:
+  diverged files and code-runs paths stay put). Bulk restores never
+  plant launchd agents or executables; placing one takes a deliberate
+  single-file `restore --force`.
+- **Nothing is ever the only copy.** `restore --force` and `revert`
+  archive whatever they overwrite; a lost database rebuilds its
+  roster from the store (the store IS the truth) and says so; and
+  `wukong seal-key backup` escrows the seal identity in the store,
+  passphrase-encrypted — losing every machine costs one passphrase,
+  not the sealed files.
+- **`wukong machines`** is the fleet view: every machine, when it
+  last pushed, what it governs — so a machine that stopped syncing is
+  visible before it's a data-loss story. `machines forget` retires
+  dead hardware.
+
+The trust model, stated plainly: the store remote and every machine
+holding it form ONE trust domain. wukong's job is to make what they
+do to each other visible and deliberate — flags, named arrivals,
+confirmations — not to defend against a fully hostile member.
 
 ### Settings
 

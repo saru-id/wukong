@@ -128,6 +128,76 @@ fn roster(db: &Db) -> anyhow::Result<Roster> {
     Ok((tracked, sealed, shared))
 }
 
+/// An empty roster with a non-empty store is a lost or reset
+/// database, not a fresh machine. The store IS the truth: rebuild —
+/// but ONLY for files that exist live (a fresh clone's store-only
+/// files must NOT be tracked here, or the next settle would commit
+/// phantom removals; they arrive through restore/sync instead).
+/// The roster, self-healing an empty database from the store first.
+fn healed_roster(db: &Db, store: &Store) -> anyhow::Result<Roster> {
+    let state = roster(db)?;
+    if !state.0.is_empty() {
+        return Ok(state);
+    }
+    self_heal_roster(db, store);
+    roster(db)
+}
+
+fn self_heal_roster(db: &Db, store: &Store) {
+    let mut healed = 0usize;
+    let mut waiting = 0usize;
+    for (lane, in_shared_lane) in [(store.clone(), false), (store.shared(), true)] {
+        for rel in lane.files().unwrap_or_default() {
+            if rel.starts_with("__wukong__") {
+                continue;
+            }
+            let live = paths::from_store_rel(&rel);
+            if !live.is_file() {
+                waiting += 1;
+                continue;
+            }
+            let sealed = std::fs::read(lane.dir().join(&rel))
+                .is_ok_and(|b| wukong_core::seal::is_sealed(&b));
+            let rel_str = rel.to_string_lossy().into_owned();
+            soft(db.track(&rel_str, sealed));
+            if in_shared_lane {
+                soft(db.set_shared(&rel_str, true));
+            }
+            healed += 1;
+        }
+    }
+    if healed == 0 {
+        return;
+    }
+    soft(db.record(
+        EventKind::Health,
+        "database",
+        &format!("roster rebuilt from the store: {healed} file(s)"),
+    ));
+    let waiting_note = if waiting > 0 {
+        format!("; {waiting} store file(s) not on this machine — `wukong sync` restores them")
+    } else {
+        String::new()
+    };
+    soft(
+        db.inbox_add(
+            InboxKind::Health,
+            "database",
+            "the database was empty — roster rebuilt from the store",
+            &format!(
+                "{healed} file(s) re-tracked from the store{waiting_note}.\n\n\
+                 Sticky secret decisions (allowances) were lost on purpose: \
+                 previously approved tokens will re-quarantine once, which is \
+                 the safe direction.\n\n\
+                 approve — nothing to run; this is a notice\n\
+                 skip    — dismiss",
+            ),
+            "",
+        )
+        .map(drop),
+    );
+}
+
 /// The shared lane's package and settings manifests, from its
 /// worktree. Unreadable manifests read as empty — the shared lane
 /// must never take the daemon down.
@@ -153,7 +223,7 @@ impl Engine {
             store.ensure_remote(&config.remote)?;
         }
         db.record(EventKind::DaemonStarted, &config.machine, "")?;
-        let (tracked_live, sealed_live, shared_files) = roster(&db)?;
+        let (tracked_live, sealed_live, shared_files) = healed_roster(&db, &store)?;
         let recipient = std::fs::read_to_string(store.dir().join(wukong_core::seal::RECIPIENT_REL))
             .ok()
             .map(|s| s.trim().to_string());
@@ -342,7 +412,7 @@ impl Engine {
     /// The watcher lost events (queue overflow, forced rescan): treat
     /// every tracked file and file sentinel as possibly changed. Cheap
     /// — unchanged content settles into a no-op commit.
-    pub fn rescan(&mut self) {
+    pub fn rescan(&mut self) -> usize {
         let now = Instant::now();
         let all: Vec<PathBuf> = self
             .tracked_live
@@ -360,24 +430,103 @@ impl Engine {
         self.settings_dirty = Some(now);
         self.check_store_integrity();
         self.check_seal_health();
-        // Other machines may have pushed to the shared lane; fold it
-        // in (mirror only — live files change through `wukong sync`,
-        // never behind the user's back) and reload the shared
-        // manifests it may have replaced.
-        if self.remote_configured() {
-            match self.store.refresh_shared() {
-                Ok(true) => {
-                    self.reload_shared_manifests();
-                    soft(self.db.record(
-                        EventKind::Shared,
-                        "shared",
-                        "updates from another machine — `wukong sync` applies them",
-                    ));
-                }
-                Ok(false) => {}
-                Err(e) => soft(Err::<(), _>(e)),
+        self.fold_shared_arrivals()
+    }
+
+    /// Fold in what other machines pushed to the shared lane (mirror
+    /// only — live files change through approve or `wukong sync`,
+    /// never behind the user's back) and turn the delta into an inbox
+    /// item that names every arrival. Returns new inbox items.
+    pub(super) fn fold_shared_arrivals(&mut self) -> usize {
+        if !self.remote_configured() {
+            return 0;
+        }
+        match self.store.refresh_shared() {
+            Ok(Some((old, new))) => {
+                let old_pkg = self.shared_manifest.clone();
+                self.reload_shared_manifests();
+                self.offer_shared_update(&old, &new, &old_pkg)
+            }
+            Ok(None) => 0,
+            Err(e) => {
+                soft(Err::<(), _>(e));
+                0
             }
         }
+    }
+
+    /// The arrival notice: every file with its danger flags, every
+    /// manifest change, and exactly what approve will and won't do.
+    fn offer_shared_update(&mut self, old: &str, new: &str, old_pkg: &Manifest) -> usize {
+        let shared = self.store.shared();
+        let changed = shared.changed_between(old, new).unwrap_or_default();
+        let mut lines = Vec::new();
+        let mut appliable: Vec<String> = Vec::new();
+        for (status, rel) in &changed {
+            if rel.starts_with("__wukong__") {
+                continue;
+            }
+            let verb = match status.as_str() {
+                "A" => "new",
+                "D" => "removed",
+                _ => "changed",
+            };
+            let flag = dangerous_rel(Path::new(rel))
+                .map(|(why, _)| format!("  ⚠ {why}"))
+                .unwrap_or_default();
+            lines.push(format!("  {verb:8} {rel}{flag}"));
+            if status != "D" {
+                appliable.push(rel.clone());
+            }
+        }
+        for (provider, name) in self.shared_manifest.entries() {
+            if !old_pkg.contains(provider, &name) {
+                lines.push(format!(
+                    "  package  +{}",
+                    wukong_core::pkg::subject(provider, &name)
+                ));
+            }
+        }
+        for (provider, name) in old_pkg.entries() {
+            if !self.shared_manifest.contains(provider, &name) {
+                lines.push(format!(
+                    "  package  -{}",
+                    wukong_core::pkg::subject(provider, &name)
+                ));
+            }
+        }
+        if lines.is_empty() {
+            // Manifest-internal churn only (ids, settings values) —
+            // an event, not a decision.
+            soft(
+                self.db
+                    .record(EventKind::Shared, "shared", "manifest updates arrived"),
+            );
+            return 0;
+        }
+        let body = format!(
+            "Another machine pushed to the shared lane:\n\n{}\n\n\
+             approve — apply the file changes now (diverged files and ⚠ paths stay put)\n\
+             skip    — later; `wukong sync` applies everything on your terms\n\
+             (new shared packages install via `wukong sync`)",
+            lines.join("\n")
+        );
+        let meta = serde_json::to_string(&appliable).unwrap_or_default();
+        soft(
+            self.db
+                .record(EventKind::Shared, "shared", "updates from another machine"),
+        );
+        let outcome = self
+            .db
+            .inbox_add(
+                InboxKind::SharedUpdate,
+                "shared",
+                "shared updates arrived — apply?",
+                &body,
+                &meta,
+            )
+            .unwrap_or_else(refreshed);
+        usize::from(outcome == wukong_core::db::InboxOutcome::New)
     }
 
     /// Re-read the shared package and settings manifests after the
@@ -435,6 +584,17 @@ impl Engine {
         } else {
             self.offer_sentinel(path, &rel)
         }
+    }
+
+    /// The overwrite archive sits beside the store, like the shared
+    /// worktree does.
+    fn archive_overwritten(&self, live: &Path) -> Option<PathBuf> {
+        let base = self
+            .store
+            .dir()
+            .parent()
+            .map_or_else(|| self.store.dir().to_path_buf(), Path::to_path_buf);
+        archive_overwritten_in(&base, live)
     }
 
     /// The store a live file's mirror belongs to — a cheap clone, so
@@ -794,6 +954,37 @@ impl Engine {
         Response::Ok { message }
     }
 
+    /// The blob arrives already passphrase-encrypted; the daemon just
+    /// files it in the shared lane so every clone can offer restore.
+    fn seal_escrow_put(&mut self, blob: &[u8]) -> Response {
+        if !wukong_core::seal::is_sealed(blob) {
+            return Response::Error {
+                message: "refusing: escrow blob is not age ciphertext".to_string(),
+            };
+        }
+        let shared = self.store.shared();
+        let rel = Path::new(wukong_core::seal::ESCROW_REL);
+        let target = shared.dir().join(rel);
+        if let Some(dir) = target.parent() {
+            soft(std::fs::create_dir_all(dir));
+        }
+        if let Err(e) = std::fs::write(&target, blob) {
+            return err(e);
+        }
+        self.commit_in(
+            &shared,
+            rel,
+            "seal: identity escrow updated",
+            "seal",
+            "escrow",
+        );
+        Response::Ok {
+            message: "escrow stored in the shared lane — any machine can now \
+`wukong seal-key restore` with the passphrase"
+                .to_string(),
+        }
+    }
+
     /// Convert a tracked file to the sealed lane and commit ciphertext.
     fn seal(&mut self, path: &str) -> Response {
         let live = paths::resolve_input(path);
@@ -962,15 +1153,8 @@ impl Engine {
                 // thread — the push task must never mutate the
                 // worktree while this thread can be committing to it —
                 // and stay dirty so the timer retries.
-                if self.remote_configured() {
-                    match self.store.refresh_shared() {
-                        Ok(true) => {
-                            self.reload_shared_manifests();
-                            self.dirty = true;
-                        }
-                        Ok(false) => {}
-                        Err(e) => soft(Err::<(), _>(e)),
-                    }
+                if self.fold_shared_arrivals() > 0 || self.store.shared().unpushed(true) > 0 {
+                    self.dirty = true;
                 }
             }
         }
@@ -1034,6 +1218,20 @@ impl Engine {
                 unignore,
             } => self.pkg_ignore(provider, &name, unignore),
             Request::PkgAdoptInstalled => self.pkg_adopt_installed(),
+            Request::SealEscrowPut { blob } => self.seal_escrow_put(&blob),
+            Request::SealEscrowGet => match std::fs::read(
+                self.store
+                    .shared()
+                    .dir()
+                    .join(wukong_core::seal::ESCROW_REL),
+            ) {
+                Ok(data) => Response::Bytes { data },
+                Err(_) => Response::Error {
+                    message: "no escrow in the store — run `wukong seal-key backup` on a \
+machine that holds the identity (and push)"
+                        .to_string(),
+                },
+            },
             Request::Seal { path } => self.seal(&path),
             Request::Unseal { path } => self.unseal(&path),
             Request::SettingsList => self.settings_list(),
@@ -1217,6 +1415,9 @@ impl Engine {
         if kind == Some(InboxKind::Health) {
             return self.resolve_health(id, &item.subject, resolution);
         }
+        if kind == Some(InboxKind::SharedUpdate) {
+            return self.resolve_shared_update(id, &item, resolution);
+        }
         if resolution == Resolution::Seal && kind != Some(InboxKind::Quarantine) {
             return Response::Error {
                 message: "seal applies to quarantined secrets — for a sentinel offer, \
@@ -1308,6 +1509,52 @@ skip keeps the change out of git"
 
         Response::Ok {
             message: format!("resolved {} ({})", item.subject, resolution.as_str()),
+        }
+    }
+
+    /// Shared arrivals: approve applies exactly the files the item
+    /// named, each through the conservative restore path (diverged
+    /// files and dangerous paths stay put and say so); skip waits for
+    /// `wukong sync`.
+    fn resolve_shared_update(
+        &mut self,
+        id: i64,
+        item: &wukong_core::events::InboxItem,
+        resolution: Resolution,
+    ) -> Response {
+        if !matches!(resolution, Resolution::Approve | Resolution::Skip) {
+            return Response::Error {
+                message: "shared updates take approve (apply) or skip (later)".to_string(),
+            };
+        }
+        soft(self.db.inbox_resolve(id, resolution));
+        soft(
+            self.db
+                .record(EventKind::Resolved, &item.subject, resolution.as_str()),
+        );
+        if resolution == Resolution::Skip {
+            return Response::Ok {
+                message: "later — `wukong sync` applies everything on your terms".to_string(),
+            };
+        }
+        let rels: Vec<String> = serde_json::from_str(&item.meta).unwrap_or_default();
+        let mut report = Vec::new();
+        for rel in rels {
+            let display = paths::display(&paths::from_store_rel(Path::new(&rel)));
+            match self.restore(Some(&display), false) {
+                Response::Ok { message } | Response::Error { message } => {
+                    report.push(format!("{display}: {}", message.replace('\n', " · ")));
+                }
+                _ => {}
+            }
+        }
+        Response::Ok {
+            message: if report.is_empty() {
+                "nothing to apply (manifest-only arrivals — `wukong sync` covers packages)"
+                    .to_string()
+            } else {
+                report.join("\n")
+            },
         }
     }
 
@@ -1421,6 +1668,7 @@ skip keeps the change out of git"
         };
         let (mut create, mut in_sync) = (0usize, 0usize);
         let mut held = Vec::new();
+        let mut creates = Vec::new();
         for (rel, lane) in sources {
             if rel.starts_with("__wukong__") {
                 continue;
@@ -1436,16 +1684,29 @@ skip keeps the change out of git"
                     in_sync += 1;
                 } else {
                     create += 1;
+                    creates.push((rel.clone(), live));
                 }
                 continue;
             }
             match std::fs::read(&live) {
-                Err(_) => create += 1,
+                Err(_) => {
+                    create += 1;
+                    creates.push((rel.clone(), live));
+                }
                 Ok(b) if b == stored => in_sync += 1,
                 Ok(_) => held.push(paths::display(&live)),
             }
         }
         let mut message = format!("{create} to restore, {in_sync} already match");
+        // Every file named — a plan that says only "3 to restore" is
+        // asking for trust it hasn't earned.
+        for (rel, live) in creates.iter().take(20) {
+            let flag = dangerous_rel(rel).map_or(String::new(), |(why, _)| format!("  ⚠ {why}"));
+            let _ = write!(message, "\n  {}{flag}", paths::display(live));
+        }
+        if creates.len() > 20 {
+            let _ = write!(message, "\n  (… and {} more)", creates.len() - 20);
+        }
         if !held.is_empty() {
             let _ = write!(
                 message,
@@ -1499,6 +1760,15 @@ skip keeps the change out of git"
                 Err(e) => return err(e),
             }
         }
+        // The current live content may be committed nowhere (pending,
+        // or quarantine-held) — preserve it before overwriting.
+        if let Some(archived) = self.archive_overwritten(&live) {
+            soft(self.db.record(
+                EventKind::Reverted,
+                &rel.to_string_lossy(),
+                &format!("previous content archived: {}", paths::display(&archived)),
+            ));
+        }
         if let Err(e) = write_private(&live, &bytes) {
             return err(e);
         }
@@ -1516,6 +1786,50 @@ skip keeps the change out of git"
                 &rev[..rev.len().min(12)]
             ),
         }
+    }
+
+    /// The per-file conscience of restore: refuse code-runs creates in
+    /// bulk (a compromised remote must not ride in on "N to restore"),
+    /// refuse to overwrite diverged files without --force, and archive
+    /// what --force overwrites — that content exists nowhere else.
+    /// `Some(reason)` means skip.
+    fn restore_write_guard(
+        &mut self,
+        rel: &Path,
+        live: &Path,
+        stored: &[u8],
+        force: bool,
+        single: bool,
+    ) -> Option<String> {
+        if let Some((why, blocking)) = dangerous_rel(rel)
+            && blocking
+            && !live.exists()
+            && !(single && force)
+        {
+            return Some(format!(
+                "{} ⚠ {why} — place it deliberately: wukong restore --force {}",
+                rel.to_string_lossy(),
+                paths::display(live)
+            ));
+        }
+        let differs = std::fs::read(live).is_ok_and(|b| b != stored);
+        if differs && !force {
+            return Some(format!(
+                "{} (differs; --force overwrites)",
+                paths::display(live)
+            ));
+        }
+        if differs && force {
+            // The diverged live content exists nowhere else.
+            if let Some(archived) = self.archive_overwritten(live) {
+                soft(self.db.record(
+                    EventKind::Restored,
+                    &rel.to_string_lossy(),
+                    &format!("previous content archived: {}", paths::display(&archived)),
+                ));
+            }
+        }
+        None
     }
 
     /// Every restorable (rel, lane) pair: the machine branch, then
@@ -1537,6 +1851,7 @@ skip keeps the change out of git"
     }
 
     fn restore(&mut self, path: Option<&str>, force: bool) -> Response {
+        let single = path.is_some();
         let sources: Vec<(PathBuf, Store)> = match path {
             Some(p) => {
                 let rel = paths::store_rel(&paths::resolve_input(p));
@@ -1590,12 +1905,8 @@ skip keeps the change out of git"
                 }
             }
             let live = paths::from_store_rel(&rel);
-            let differs = std::fs::read(&live).is_ok_and(|b| b != stored);
-            if differs && !force {
-                skipped.push(format!(
-                    "{} (differs; --force overwrites)",
-                    paths::display(&live)
-                ));
+            if let Some(reason) = self.restore_write_guard(&rel, &live, &stored, force, single) {
+                skipped.push(reason);
                 continue;
             }
             if let Some(dir) = live.parent()
@@ -1700,14 +2011,60 @@ fn truncate_body(text: &str) -> String {
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    // O_NOFOLLOW: a symlink planted at the target must fail the write,
+    // not redirect it — restore writes wherever the store says, and
+    // the store can carry another machine's (or a compromised
+    // remote's) idea of where that is.
+    const O_NOFOLLOW: i32 = 0x0100; // macOS
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
+        .custom_flags(O_NOFOLLOW)
         .mode(0o600)
         .open(path)?;
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     file.write_all(bytes)
+}
+
+/// Why a store-relative path deserves a ⚠, and whether a bulk restore
+/// may place it at all. Code-runs locations (launchd dirs, bin dirs)
+/// are BLOCKING: placing one takes a deliberate single-file
+/// `restore --force`. Merely writing outside $HOME is flagged for
+/// transparency but not blocked — deliberately tracked outside-home
+/// files must survive disaster recovery without per-file ceremony.
+fn dangerous_rel(rel: &Path) -> Option<(&'static str, bool)> {
+    for component in rel.components() {
+        let c = component.as_os_str().to_string_lossy();
+        if c == "LaunchAgents" || c == "LaunchDaemons" {
+            return Some(("installs a launchd agent", true));
+        }
+        if c == "bin" {
+            return Some(("an executable location", true));
+        }
+    }
+    if rel.starts_with("__abs__") {
+        return Some(("writes outside $HOME", false));
+    }
+    None
+}
+
+/// Preserve bytes that are about to be overwritten and exist nowhere
+/// else — wukong never destroys the only copy of anything. The
+/// archive lives BESIDE the store (never a global path — sandboxed
+/// engines get sandboxed archives). Returns the archive path when
+/// something was saved.
+fn archive_overwritten_in(base: &Path, live: &Path) -> Option<PathBuf> {
+    let bytes = std::fs::read(live).ok()?;
+    let dir = base.join("overwritten");
+    paths::ensure_private_dir(&dir).ok()?;
+    let stamp = now().replace([':', '.'], "-");
+    let name = live
+        .file_name()
+        .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().into_owned());
+    let target = dir.join(format!("{stamp}-{name}"));
+    write_private(&target, &bytes).ok()?;
+    Some(target)
 }
 
 fn is_noise(path: &Path) -> bool {

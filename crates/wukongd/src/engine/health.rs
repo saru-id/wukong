@@ -223,6 +223,27 @@ impl Engine {
             _ => false,
         };
         if unlocks {
+            // The key works — but does it exist ANYWHERE else? Sealed
+            // files with an unbacked-up identity are one dead disk
+            // from unrecoverable.
+            let escrow = self
+                .store
+                .shared()
+                .dir()
+                .join(wukong_core::seal::ESCROW_REL)
+                .is_file();
+            if !escrow {
+                return self.health_alert(
+                    "seal-backup",
+                    "the seal identity has no backup",
+                    "This machine holds the only copy of the key that unlocks your \
+                     sealed files. `wukong seal-key backup` escrows it in the store, \
+                     passphrase-encrypted — losing every machine then costs one \
+                     passphrase, not the files.\n\n\
+                     approve — nothing to run; back it up when convenient\n\
+                     skip    — dismiss for a day",
+                );
+            }
             return 0;
         }
         self.health_alert(

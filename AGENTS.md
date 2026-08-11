@@ -215,6 +215,26 @@ application that may sit nearby on disk as `../wukong-backup`).
   `pnpm root -g` once froze the suite for two hours. Override npm AND
   pnpm to absent paths in every detect_roots test.
 
+- **The trust model: one domain, made visible.** The remote and every
+  machine holding the store are a single trust domain — wukong makes
+  cross-machine effects VISIBLE and DELIBERATE rather than defending
+  against a hostile member. Concretely: shared arrivals become an
+  inbox item naming every file (fold_shared_arrivals; approve applies
+  via the conservative restore path), `dangerous_rel` splits BLOCKING
+  paths (LaunchAgents/LaunchDaemons/bin — bulk restore refuses;
+  single-file --force places) from flag-only (`__abs__` outside-home,
+  shown but not blocked: deliberately tracked outside-home files must
+  survive recovery without ceremony), and write_private is O_NOFOLLOW.
+- **Nothing is ever the only copy.** Overwrites (revert, restore
+  --force) archive prior bytes BESIDE the store (`../overwritten` —
+  never a global path; sandboxes get sandboxed archives). An empty
+  roster with a non-empty store self-heals — but ONLY for files whose
+  live copy exists (tracking store-only files would commit phantom
+  removals on the next settle); allowances stay lost on purpose
+  (fail-closed). The seal escrow (`__wukong__/age.key.enc`, shared
+  lane) is passphrase-encrypted CLIENT-side; the daemon only ever
+  files ciphertext and refuses anything that isn't.
+
 ## Verification
 
 ```sh

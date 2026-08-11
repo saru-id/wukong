@@ -117,6 +117,13 @@ fn handle_args() {
     }
 }
 
+/// One notification per batch of news, and only when enabled.
+fn notify_new(notify_on: bool, new_items: usize) {
+    if notify_on && new_items > 0 {
+        notify_user::inbox(new_items);
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     handle_args();
@@ -186,12 +193,10 @@ async fn main() -> anyhow::Result<()> {
     while let Some(msg) = rx.recv().await {
         match msg {
             Msg::Fs(path) => engine.touch(path),
-            Msg::Rescan => engine.rescan(),
+            Msg::Rescan => notify_new(notify_on, engine.rescan()),
             Msg::DebounceTick => {
-                let new_items = engine.tick();
-                if notify_on && new_items > 0 {
-                    notify_user::inbox(new_items);
-                }
+                let n = engine.tick();
+                notify_new(notify_on, n);
             }
             Msg::PushTick => {
                 if engine.wants_push() {

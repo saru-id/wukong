@@ -1442,3 +1442,157 @@ fn crash_loop_is_noticed_from_the_event_trail() {
         item.body
     );
 }
+
+#[test]
+fn shared_arrivals_become_inbox_items_and_approve_is_conservative() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let remote = tmp.path().join("remote.git");
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q", "--bare", "-b", "main"])
+            .arg(&remote)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let url = remote.to_string_lossy().into_owned();
+    let mut rig = rig();
+    rig.engine.config.remote = url.clone();
+    rig.engine.store.ensure_remote(&url).unwrap();
+    rig.engine.store.push_shared().unwrap();
+
+    // Another machine pushes: one file whose live copy this machine
+    // already has (appliable), one at a code-runs path (blocked).
+    let other =
+        wukong_core::Store::clone_from(&url, &tmp.path().join("other/store"), "other").unwrap();
+    let safe_live = rig.home.join(".arrival");
+    std::fs::write(&safe_live, "from another machine\n").unwrap();
+    let rel = other
+        .shared()
+        .mirror_in(&safe_live, b"from another machine\n")
+        .unwrap();
+    other.shared().commit(&rel, "shared: arrival").unwrap();
+    let evil_rel = std::path::PathBuf::from("Library/LaunchAgents/evil.plist");
+    let evil_target = other.shared().dir().join(&evil_rel);
+    std::fs::create_dir_all(evil_target.parent().unwrap()).unwrap();
+    std::fs::write(&evil_target, b"<plist/>").unwrap();
+    other.shared().commit(&evil_rel, "shared: evil").unwrap();
+    other.push_shared().unwrap();
+
+    // The rescan folds it in and files ONE item naming everything.
+    let new_items = rig.engine.rescan();
+    assert_eq!(new_items, 1);
+    let item = rig
+        .engine
+        .db
+        .inbox_open()
+        .unwrap()
+        .into_iter()
+        .find(|i| i.kind() == Some(InboxKind::SharedUpdate))
+        .expect("shared-update item");
+    assert!(
+        item.body.contains(".arrival") || item.body.contains("__abs__"),
+        "{}",
+        item.body
+    );
+    assert!(item.body.contains("evil.plist"), "{}", item.body);
+    assert!(
+        item.body.contains("⚠"),
+        "danger flag missing: {}",
+        item.body
+    );
+
+    // Approve applies the safe file and refuses to plant the agent.
+    let resp = rig.engine.resolve(item.id, Resolution::Approve);
+    let Response::Ok { message } = resp else {
+        panic!("approve failed");
+    };
+    assert!(
+        !wukong_core::paths::from_store_rel(&evil_rel).exists(),
+        "agent must not be planted by approve"
+    );
+    assert!(
+        message.contains("⚠") || message.contains("restored"),
+        "{message}"
+    );
+    // The safe file is now tracked (restore re-tracks what it lands).
+    assert!(rig.engine.tracked_live.contains(&safe_live));
+}
+
+#[test]
+fn empty_db_with_populated_store_self_heals() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    let mut config = Config {
+        machine: "testbox".to_string(),
+        debounce_secs: 0,
+        ..Config::default()
+    };
+    config.packages.enabled = false;
+    let mut engine =
+        Engine::new(config.clone(), &root.join("wukong.db"), &root.join("store")).unwrap();
+    let live = root.join("home/.healme");
+    std::fs::write(&live, "governed\n").unwrap();
+    engine.track(live.to_str().unwrap(), false, false);
+    // A file that exists only in the store (its live copy is gone).
+    let ghost = root.join("home/.ghost");
+    std::fs::write(&ghost, "gone soon\n").unwrap();
+    engine.track(ghost.to_str().unwrap(), false, false);
+    std::fs::remove_file(&ghost).unwrap();
+    drop(engine);
+
+    // The database is lost; a new daemon starts over the same store.
+    let engine = Engine::new(config, &root.join("wukong-2.db"), &root.join("store")).unwrap();
+    assert!(
+        engine.tracked_live.contains(&live),
+        "live file re-tracked from the store"
+    );
+    assert!(
+        !engine.tracked_live.contains(&ghost),
+        "store-only file must NOT be tracked (phantom-removal hazard)"
+    );
+    let items = engine.db.inbox_open().unwrap();
+    assert!(
+        items.iter().any(|i| i.subject == "database"),
+        "self-heal must be loud: {items:?}"
+    );
+}
+
+#[test]
+fn escrow_rides_the_shared_lane() {
+    let mut rig = seal_rig();
+    let blob = wukong_core::seal::encrypt_with_passphrase("horse battery", b"AGE-SECRET-KEY-1FAKE")
+        .unwrap();
+    let resp = rig.engine.seal_escrow_put(&blob);
+    assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
+    let stored = std::fs::read(
+        rig.engine
+            .store
+            .shared()
+            .dir()
+            .join(wukong_core::seal::ESCROW_REL),
+    )
+    .unwrap();
+    assert_eq!(stored, blob);
+    // Garbage is refused — the daemon never files a non-ciphertext.
+    let resp = rig.engine.seal_escrow_put(b"not ciphertext");
+    assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
+}
+
+#[test]
+fn overwrites_archive_the_previous_content() {
+    let mut rig = rig();
+    let file = track(&mut rig, ".zshrc", "version one\n");
+    edit_and_settle(&mut rig, &file, "version two\n");
+    // An UNCOMMITTED live edit (never settled) is the only copy.
+    std::fs::write(&file, "precious uncommitted\n").unwrap();
+    rig.engine.revert(file.to_str().unwrap(), None);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "version one\n");
+    let archive_dir = rig.engine.store.dir().parent().unwrap().join("overwritten");
+    let saved = std::fs::read_dir(&archive_dir)
+        .unwrap()
+        .flatten()
+        .any(|e| std::fs::read_to_string(e.path()).is_ok_and(|c| c == "precious uncommitted\n"));
+    assert!(saved, "overwritten content must be archived");
+}

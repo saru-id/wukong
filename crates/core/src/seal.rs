@@ -23,6 +23,12 @@ use std::path::{Path, PathBuf};
 /// Where the PUBLIC recipient lives inside the store repo.
 pub const RECIPIENT_REL: &str = "__wukong__/age.recipient";
 
+/// Where the passphrase-encrypted identity escrow lives — in the
+/// SHARED lane, so every clone can offer `seal-key restore`. The
+/// passphrase never leaves the user's head; losing every machine
+/// costs one passphrase, not the sealed files.
+pub const ESCROW_REL: &str = "__wukong__/age.key.enc";
+
 /// The age binary format's magic — how sealed blobs are recognized.
 const AGE_MAGIC: &[u8] = b"age-encryption.org/v1";
 
@@ -85,6 +91,36 @@ pub fn encrypt(recipient: &str, plaintext: &[u8]) -> Result<Vec<u8>, SealError> 
     writer
         .finish()
         .map_err(|e| SealError::Crypto(e.to_string()))?;
+    Ok(out)
+}
+
+/// Passphrase-encrypt bytes (scrypt under the hood) — the escrow
+/// path for the identity itself.
+pub fn encrypt_with_passphrase(passphrase: &str, plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
+    let encryptor = age::Encryptor::with_user_passphrase(age::secrecy::SecretString::from(
+        passphrase.to_string(),
+    ));
+    let mut out = Vec::new();
+    let mut writer = encryptor
+        .wrap_output(&mut out)
+        .map_err(|e| SealError::Crypto(e.to_string()))?;
+    writer.write_all(plaintext)?;
+    writer
+        .finish()
+        .map_err(|e| SealError::Crypto(e.to_string()))?;
+    Ok(out)
+}
+
+pub fn decrypt_with_passphrase(passphrase: &str, ciphertext: &[u8]) -> Result<Vec<u8>, SealError> {
+    let decryptor =
+        age::Decryptor::new(ciphertext).map_err(|e| SealError::Crypto(e.to_string()))?;
+    let identity =
+        age::scrypt::Identity::new(age::secrecy::SecretString::from(passphrase.to_string()));
+    let mut reader = decryptor
+        .decrypt(std::iter::once(&identity as &dyn age::Identity))
+        .map_err(|e| SealError::Crypto(e.to_string()))?;
+    let mut out = Vec::new();
+    reader.read_to_end(&mut out)?;
     Ok(out)
 }
 
@@ -201,6 +237,18 @@ impl IdentityStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escrow_round_trips_and_wrong_passphrase_fails() {
+        let (identity, _) = generate();
+        let blob = encrypt_with_passphrase("horse battery", identity.as_bytes()).unwrap();
+        assert!(is_sealed(&blob), "escrow blob is ordinary age ciphertext");
+        let back = decrypt_with_passphrase("horse battery", &blob).unwrap();
+        assert_eq!(back, identity.as_bytes());
+        assert!(decrypt_with_passphrase("wrong", &blob).is_err());
+        // And the x25519 path refuses a scrypt blob rather than panic.
+        assert!(decrypt(&identity, &blob).is_err());
+    }
 
     #[test]
     fn round_trip_and_magic() {

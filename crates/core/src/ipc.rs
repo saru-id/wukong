@@ -133,6 +133,14 @@ pub enum Request {
         #[serde(default)]
         undo: bool,
     },
+    /// Store the passphrase-encrypted seal identity in the shared
+    /// lane (the blob arrives already encrypted — the daemon never
+    /// sees a passphrase).
+    SealEscrowPut {
+        blob: Vec<u8>,
+    },
+    /// Fetch the escrow blob for client-side decryption.
+    SealEscrowGet,
     /// Convert a tracked file to the sealed lane.
     Seal {
         path: String,
@@ -192,6 +200,9 @@ pub enum Response {
     },
     Providers {
         entries: Vec<ProviderStatus>,
+    },
+    Bytes {
+        data: Vec<u8>,
     },
     CaptureDiff {
         changes: Vec<CaptureChange>,

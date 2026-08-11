@@ -122,6 +122,16 @@ check "restore decrypts the sealed file" "grep -q '$SEALTOK' '$HOME/.env'"
 check "doctor reports the seal identity unlocks this store" "\"$W\" doctor | grep -q 'seal identity unlocks this store'"
 check "deep doctor decrypts every sealed blob" "\"$W\" doctor --deep | grep -q 'sealed blob(s) decrypt with this machine'"
 
+echo "=== escrow: losing every machine costs one passphrase"
+printf 'horse battery staple\nhorse battery staple\n' | "$W" seal-key backup > /dev/null
+check "escrow blob lands in the shared lane" "[ -f \"$XDG_DATA_HOME/wukong/shared/__wukong__/age.key.enc\" ]"
+check "escrow is ciphertext" "head -c 21 \"$XDG_DATA_HOME/wukong/shared/__wukong__/age.key.enc\" | grep -q 'age-encryption.org'"
+cp "$ROOT/age.key" "$ROOT/age.key.orig"
+rm "$ROOT/age.key"
+printf 'horse battery staple\n' | "$W" seal-key restore > /dev/null
+check "identity restored from escrow" "diff -q \"$ROOT/age.key\" \"$ROOT/age.key.orig\" > /dev/null"
+check "restored key still unlocks the store" "\"$W\" doctor --deep | grep -q 'sealed blob(s) decrypt with this machine'"
+
 echo "=== sentinel discovery + forbidden skip"
 echo 'eval brew shellenv' > "$HOME/.zprofile"
 mkdir -p "$HOME/.config/sometool"

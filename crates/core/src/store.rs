@@ -234,14 +234,14 @@ impl Store {
     /// Local commits rebase on top, and where the SAME file changed on
     /// both sides the LOCAL content wins — live files win, always.
     /// Returns true when remote commits arrived.
-    pub fn refresh_shared(&self) -> Result<bool, StoreError> {
+    pub fn refresh_shared(&self) -> Result<Option<(String, String)>, StoreError> {
         let shared = self.shared();
         if shared
             .git(&["fetch", "-q", "origin", SHARED_BRANCH])
             .is_err()
         {
             // Remote unreachable or branch not there yet — not news.
-            return Ok(false);
+            return Ok(None);
         }
         let behind: usize = shared
             .git(&[
@@ -252,12 +252,79 @@ impl Store {
             .parse()
             .unwrap_or(0);
         if behind == 0 {
-            return Ok(false);
+            return Ok(None);
         }
+        let old = shared.git(&["rev-parse", "HEAD"])?;
         // In a rebase, "theirs" is the commit being replayed — ours,
         // in the human sense. Local wins.
         shared.git(&["rebase", "-X", "theirs", &format!("origin/{SHARED_BRANCH}")])?;
-        Ok(true)
+        let new = shared.git(&["rev-parse", "HEAD"])?;
+        Ok(Some((old, new)))
+    }
+
+    /// `(status, path)` for everything that changed between two
+    /// revisions — A(dded), M(odified), D(eleted).
+    pub fn changed_between(
+        &self,
+        old: &str,
+        new: &str,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        Ok(self
+            .git(&["diff", "--name-status", old, new])?
+            .lines()
+            .filter_map(|line| {
+                let (status, path) = line.split_once('\t')?;
+                Some((
+                    status.chars().next().unwrap_or('?').to_string(),
+                    path.to_string(),
+                ))
+            })
+            .collect())
+    }
+
+    /// Retire a machine: delete its branch from the remote and the
+    /// local tracking ref. Its shared contributions stay — shared is
+    /// every machine's.
+    pub fn forget_machine(&self, name: &str) -> Result<(), StoreError> {
+        self.git(&["push", "-q", "origin", "--delete", name])?;
+        let _ = self.git(&["update-ref", "-d", &format!("refs/remotes/origin/{name}")]);
+        Ok(())
+    }
+
+    /// Every machine the remote knows: branch name, last-commit date,
+    /// and file count — the fleet's liveness view. Fetches first so
+    /// the answer is current.
+    pub fn machines(&self) -> Result<Vec<(String, String, usize)>, StoreError> {
+        let _ = self.git(&[
+            "fetch",
+            "-q",
+            "origin",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ]);
+        let refs = self.git(&[
+            "for-each-ref",
+            "--format=%(refname:short)\t%(committerdate:format:%Y-%m-%d %H:%M)",
+            "refs/remotes/origin",
+        ])?;
+        let mut out = Vec::new();
+        for line in refs.lines() {
+            let Some((name, date)) = line.split_once('\t') else {
+                continue;
+            };
+            let name = name.trim_start_matches("origin/").to_string();
+            if name == "HEAD" {
+                continue;
+            }
+            let files = self
+                .git(&["ls-tree", "-r", "--name-only", &format!("origin/{name}")])
+                .map_or(0, |t| {
+                    t.lines()
+                        .filter(|l| !l.is_empty() && !l.starts_with("__wukong__"))
+                        .count()
+                });
+            out.push((name, date.to_string(), files));
+        }
+        Ok(out)
     }
 
     /// Push the shared branch. Never mutates the worktree — when the
@@ -628,7 +695,7 @@ mod tests {
         a.shared().mirror_in(&live, b"from a2\n").unwrap();
         a.shared().commit(&rel, "shared: a2").unwrap();
         assert!(a.push_shared().is_err(), "non-FF must reject, not fold");
-        assert!(a.refresh_shared().unwrap());
+        assert!(a.refresh_shared().unwrap().is_some());
         a.push_shared().unwrap();
         assert_eq!(
             std::fs::read(a.shared().dir().join(&rel)).unwrap(),
@@ -636,13 +703,13 @@ mod tests {
         );
 
         // B refreshes and receives A's winning content.
-        assert!(b.refresh_shared().unwrap());
+        assert!(b.refresh_shared().unwrap().is_some());
         assert_eq!(
             std::fs::read(b.shared().dir().join(&rel)).unwrap(),
             b"from a2\n"
         );
         // Quiet when nothing new arrived.
-        assert!(!b.refresh_shared().unwrap());
+        assert!(b.refresh_shared().unwrap().is_none());
     }
 
     #[test]

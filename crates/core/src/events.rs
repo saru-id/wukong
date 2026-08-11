@@ -118,6 +118,11 @@ pub enum InboxKind {
     /// waiting too long, store damage. `approve` runs the obvious fix
     /// where one exists; `skip` dismisses for a day.
     Health,
+    /// Another machine pushed to the shared lane. The body names every
+    /// arrival; `approve` applies the file changes (conservatively —
+    /// dangerous paths and diverged files stay put), `skip` waits for
+    /// your `wukong sync`.
+    SharedUpdate,
 }
 
 impl InboxKind {
@@ -130,6 +135,7 @@ impl InboxKind {
             Self::PackageGone => "package-gone",
             Self::Setting => "setting",
             Self::Health => "health",
+            Self::SharedUpdate => "shared-update",
         }
     }
 
@@ -142,6 +148,7 @@ impl InboxKind {
             "package-gone" => Some(Self::PackageGone),
             "setting" => Some(Self::Setting),
             "health" => Some(Self::Health),
+            "shared-update" => Some(Self::SharedUpdate),
             _ => None,
         }
     }

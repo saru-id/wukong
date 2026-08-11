@@ -409,6 +409,20 @@ wukong resolve 3 skip            not now")]
         resolution: ResolutionArg,
     },
 
+    /// Every machine in the store, with liveness
+    #[command(subcommand_value_name = "ACTION")]
+    #[command(
+        long_about = "The fleet view: every machine branch on the remote, when it last \
+committed, and how many files it governs — so \"the mini hasn't pushed \
+in three weeks\" is visible before it's a data-loss story. `forget` \
+deletes a retired machine's branch from the remote (confirmed; its \
+shared contributions stay)."
+    )]
+    Machines {
+        #[command(subcommand)]
+        action: Option<MachinesAction>,
+    },
+
     /// Show or set the backup/sync remote
     #[command(
         long_about = "A machine starts local-only and fully working; the remote is a \
@@ -528,6 +542,19 @@ backups. Run it before you need it."
 }
 
 #[derive(Subcommand)]
+pub enum MachinesAction {
+    /// Delete a retired machine's branch from the remote
+    Forget {
+        /// The machine (branch) name, as `wukong machines` lists it
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum SealKeyAction {
     /// Print the private identity for transfer to another machine
     #[command(
@@ -539,6 +566,17 @@ there. Anyone holding this line can read your sealed files."
     Export,
     /// Read an identity from stdin and store it on this machine
     Import,
+    /// Escrow the identity in the store, passphrase-encrypted
+    #[command(
+        long_about = "Encrypt the seal identity with a passphrase (age scrypt) and store \
+the blob in the SHARED lane, where every clone can reach it. Losing \
+every machine then costs one passphrase, not the sealed files. The \
+passphrase never leaves this process — the daemon only ever sees \
+ciphertext."
+    )]
+    Backup,
+    /// Recover the identity from the store's escrow with the passphrase
+    Restore,
 }
 
 #[derive(Subcommand)]
@@ -877,6 +915,109 @@ fn seal_key(action: &SealKeyAction) -> anyhow::Result<()> {
             println!("seal identity imported");
             Ok(())
         }
+        SealKeyAction::Backup => {
+            let identity = store
+                .load()?
+                .ok_or_else(|| anyhow::anyhow!("no seal identity on this machine"))?;
+            let pass = read_passphrase("Escrow passphrase: ")?;
+            let again = read_passphrase("Once more: ")?;
+            anyhow::ensure!(pass == again, "passphrases differ — nothing stored");
+            anyhow::ensure!(pass.len() >= 8, "use at least 8 characters");
+            let blob = seal::encrypt_with_passphrase(&pass, identity.as_bytes())?;
+            say(Request::SealEscrowPut { blob })
+        }
+        SealKeyAction::Restore => {
+            let Response::Bytes { data } = client::call(Request::SealEscrowGet)? else {
+                anyhow::bail!(
+                    "no escrow in the store — attach your remote first (`wukong remote <url>`), \
+                     or back up from a machine that holds the key"
+                );
+            };
+            let pass = read_passphrase("Escrow passphrase: ")?;
+            let identity = String::from_utf8(seal::decrypt_with_passphrase(&pass, &data)?)
+                .map_err(|_| anyhow::anyhow!("escrow decrypted to something unexpected"))?;
+            // Same proof import demands: the key must unlock THIS store.
+            if let Ok(recipient) = std::fs::read_to_string(&recipient_path) {
+                let probe = seal::encrypt(recipient.trim(), b"probe")?;
+                anyhow::ensure!(
+                    seal::decrypt(identity.trim(), &probe).is_ok(),
+                    "decrypted an identity, but it does not match this store's recipient"
+                );
+            }
+            store.save(identity.trim())?;
+            println!("seal identity restored from escrow — sealed files decrypt here now");
+            Ok(())
+        }
+    }
+}
+
+/// Hidden at a terminal; a plain stdin line otherwise (drills,
+/// scripts) — documented, deliberate.
+fn read_passphrase(prompt_text: &str) -> anyhow::Result<String> {
+    use std::io::IsTerminal as _;
+    if std::io::stdin().is_terminal() {
+        Ok(rpassword::prompt_password(prompt_text)?)
+    } else {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        Ok(line.trim_end_matches('\n').to_string())
+    }
+}
+
+fn machines(action: Option<MachinesAction>) -> anyhow::Result<()> {
+    use wukong_core::{Config, Store, paths};
+    let config = Config::load()
+        .map_err(|e| anyhow::anyhow!(e))?
+        .ok_or_else(|| anyhow::anyhow!("this machine isn't set up yet — type `wukong` to begin"))?;
+    anyhow::ensure!(
+        !config.remote.is_empty(),
+        "local-only — the fleet view needs a remote (`wukong remote <url>`)"
+    );
+    let store = Store::open(&paths::store_dir(), &config.machine)?;
+    match action {
+        None => {
+            let machines = store.machines()?;
+            if machines.is_empty() {
+                println!(
+                    "nothing on the remote yet — the first push creates this machine's branch"
+                );
+                return Ok(());
+            }
+            for (name, date, files) in machines {
+                let marker = if name == config.machine { "*" } else { " " };
+                let lane = if name == "shared" {
+                    " (the shared lane)"
+                } else {
+                    ""
+                };
+                println!("{marker} {name:24} last commit {date}   {files:4} file(s){lane}");
+            }
+            println!(
+                "\n* = this machine · a branch that stops moving is a machine that stopped pushing"
+            );
+            Ok(())
+        }
+        Some(MachinesAction::Forget { name, yes }) => {
+            anyhow::ensure!(
+                name != config.machine,
+                "that's THIS machine — `wukong uninstall` retires it"
+            );
+            anyhow::ensure!(
+                name != "shared",
+                "the shared lane is every machine's — it can't be forgotten"
+            );
+            if !yes
+                && !crate::pkg_cli::confirm(&format!(
+                    "delete {name}'s branch from the remote? its history is gone for good [y/N] "
+                ))
+            {
+                println!("kept");
+                return Ok(());
+            }
+            store.forget_machine(&name)?;
+            println!("{name} forgotten — its branch is gone from the remote");
+            Ok(())
+        }
     }
 }
 
@@ -948,7 +1089,8 @@ fn preflight(command: Option<&Command>) -> anyhow::Result<()> {
             | Command::Inbox { .. }
             | Command::Resolve { .. }
             | Command::Diff { .. }
-            | Command::Log { .. },
+            | Command::Log { .. }
+            | Command::Machines { .. },
         ) => {
             anyhow::bail!("this machine isn't set up yet — type `wukong` to begin");
         }
@@ -989,6 +1131,7 @@ fn main() -> anyhow::Result<()> {
             }
             tui::run()
         }
+        Some(Command::Machines { action }) => machines(action),
         Some(Command::Remote { url }) => match url {
             Some(url) => remote::set(&url),
             None => remote::show(),
