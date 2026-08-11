@@ -1,7 +1,9 @@
 //! The daemon's memory: `SQLite` at `~/.local/share/wukong/wukong.db`.
-//! Three tables — the append-only event log, the tracked-file roster,
-//! and the inbox. The schema is created complete on open; the first
-//! real migration will introduce migration machinery, not before.
+//! The append-only event log, the tracked-file roster, the inbox, and
+//! the acknowledged-state tables. Versioned via `PRAGMA user_version`:
+//! open migrates forward in order and refuses databases from the
+//! future — the upgrade covenant, in force since the first real
+//! deployment.
 
 use crate::events::{Event, EventKind, InboxItem, InboxKind, Resolution};
 use rusqlite::{Connection, params};
@@ -14,7 +16,25 @@ pub enum DbError {
     Sqlite(#[from] rusqlite::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error(
+        "database is from a NEWER wukong (schema {found} > {supported}) — update this \
+binary (`wukong update`), or if you just rolled back: the database is rebuildable — \
+delete it and the roster self-heals from the store (allowances re-quarantine, which \
+is the safe direction)"
+    )]
+    Newer { found: i64, supported: i64 },
 }
+
+/// The schema this binary speaks. Bump it WITH a migration appended
+/// to `MIGRATIONS` in the same commit — the upgrade drill holds you
+/// to it.
+pub const SCHEMA_VERSION: i64 = 1;
+
+/// `MIGRATIONS[n]` migrates schema n → n+1 (version 0 marks a
+/// pre-stamp or freshly created database, which is already current
+/// shape — it stamps straight to the latest). Append-only, run in
+/// order, each inside the open transaction of a startup.
+const MIGRATIONS: &[&str] = &[];
 
 pub struct Db {
     conn: Connection,
@@ -80,8 +100,37 @@ impl Db {
             );",
         )?;
         let db = Self { conn };
+        db.migrate()?;
         db.prune_events()?;
         Ok(db)
+    }
+
+    /// The upgrade covenant: stamp, migrate forward in order, refuse
+    /// to touch the future.
+    fn migrate(&self) -> Result<(), DbError> {
+        let found: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if found > SCHEMA_VERSION {
+            return Err(DbError::Newer {
+                found,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        if found == 0 {
+            // Fresh, or created before stamping existed — either way
+            // the CREATE statements above produced the current shape.
+            self.conn
+                .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            return Ok(());
+        }
+        let from = usize::try_from(found).unwrap_or(0);
+        for step in &MIGRATIONS[from - 1..] {
+            self.conn.execute_batch(step)?;
+        }
+        self.conn
+            .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        Ok(())
     }
 
     /// Keep the event log from growing without bound. Called at open
@@ -413,6 +462,26 @@ mod tests {
 
     fn db() -> Db {
         Db::open(&tempfile::TempDir::new().unwrap().path().join("t.db")).unwrap()
+    }
+
+    #[test]
+    fn schema_is_stamped_and_the_future_is_refused() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("wukong.db");
+        drop(Db::open(&path).unwrap());
+        // Reopen: stamped, still fine.
+        let db = Db::open(&path).unwrap();
+        let v: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        db.conn.pragma_update(None, "user_version", 99).unwrap();
+        drop(db);
+        let Err(err) = Db::open(&path) else {
+            panic!("a future schema must be refused");
+        };
+        assert!(err.to_string().contains("NEWER wukong"), "{err}");
     }
 
     #[test]

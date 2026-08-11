@@ -506,8 +506,11 @@ make, not a background surprise. `--check` only reports."
     )]
     Update {
         /// Report whether an update exists, without installing it
-        #[arg(long)]
+        #[arg(long, conflicts_with = "rollback")]
         check: bool,
+        /// Restore the previous binaries (kept from the last update)
+        #[arg(long)]
+        rollback: bool,
     },
 
     /// Check the health of the whole setup
@@ -1201,7 +1204,7 @@ fn main() -> anyhow::Result<()> {
         }),
         Some(Command::Daemon { action }) => launchd::run(action),
         Some(Command::Uninstall { purge, yes }) => launchd::uninstall(purge, yes),
-        Some(Command::Update { check }) => update::run(check),
+        Some(Command::Update { check, rollback }) => update::run(check, rollback),
         Some(Command::Doctor { deep }) => {
             doctor();
             if deep {

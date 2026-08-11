@@ -815,6 +815,10 @@ pub struct SettingsManifest {
     /// inferred from the domain) at record time.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub restarts: BTreeMap<String, BTreeMap<String, String>>,
+    /// Forward compatibility across a mixed-version fleet: a newer
+    /// wukong's fields survive this binary's round-trip.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, toml::Value>,
 }
 
 impl SettingsManifest {

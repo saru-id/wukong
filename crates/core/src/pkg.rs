@@ -168,7 +168,7 @@ pub fn parse_subject(s: &str) -> Option<(Provider, &str)> {
 /// never be asked about again — keyed by provider, so a new provider
 /// is a table entry, not a schema change. `BTreeMap`/`BTreeSet` keep
 /// the file sorted and diffs one line per change.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Manifest {
     /// provider → wanted package names.
@@ -180,6 +180,11 @@ pub struct Manifest {
     /// name); captured at adoption when Spotlight knows it.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub ids: BTreeMap<String, BTreeMap<String, String>>,
+    /// Forward compatibility across a mixed-version fleet: fields a
+    /// NEWER wukong wrote survive this binary's load→save round-trip
+    /// instead of being silently dropped from the shared manifest.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, toml::Value>,
 }
 
 impl Manifest {
@@ -1116,6 +1121,28 @@ mod tests {
         m.set_id(Provider::Mas, "Xcode", "497799835");
         m.add_ignore(Provider::Mas, "Xcode");
         assert!(m.ids.is_empty(), "ignore must drop the id too");
+    }
+
+    #[test]
+    fn a_newer_wukongs_fields_survive_the_round_trip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let future = r#"
+[packages]
+formula = ["jq"]
+
+[from-the-future]
+frobnication = true
+"#;
+        std::fs::create_dir_all(tmp.path().join("__wukong__")).unwrap();
+        std::fs::write(tmp.path().join(MANIFEST_REL), future).unwrap();
+        let m = Manifest::load(tmp.path()).unwrap().unwrap();
+        assert!(m.contains(Provider::Formula, "jq"));
+        m.save(tmp.path()).unwrap();
+        let text = std::fs::read_to_string(tmp.path().join(MANIFEST_REL)).unwrap();
+        assert!(
+            text.contains("frobnication"),
+            "an older binary must not eat a newer one's fields: {text}"
+        );
     }
 
     #[test]

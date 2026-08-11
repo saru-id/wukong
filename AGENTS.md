@@ -240,6 +240,19 @@ application that may sit nearby on disk as `../wukong-backup`).
   lane) is passphrase-encrypted CLIENT-side; the daemon only ever
   files ciphertext and refuses anything that isn't.
 
+- **The upgrade covenant (in force since v0.18.0).** Every schema
+  change bumps `db::SCHEMA_VERSION` and appends its migration to
+  `MIGRATIONS` IN THE SAME COMMIT; every protocol change keeps the
+  clean mismatch error; every manifest change stays serde-tolerant
+  (the `extra` flatten maps preserve a newer wukong's fields across a
+  mixed-version fleet — never remove them). Databases from the future
+  are refused with the rebuildable-db guidance, never guessed at.
+  `drills/upgrade.sh` swaps the CURRENT build over a world built by
+  the PREVIOUS RELEASE and must stay green — it is the enforcement,
+  not the release notes. Release notes still name any breaking
+  change. This supersedes the clean-slate rule: schema, protocol, and
+  manifests no longer break freely.
+
 ## Verification
 
 ```sh

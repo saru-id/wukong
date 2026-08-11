@@ -195,7 +195,12 @@ guided SSH key setup appears if and when a remote needs it):
 wukong
 ```
 
-Staying current is a decision, never a background surprise:
+Staying current is a decision, never a background surprise — and a
+safe one: updates keep the previous binaries (`wukong update
+--rollback` restores them in seconds), verify the daemon comes back
+on the new version, migrate the database forward in order, and refuse
+databases from the future with the way out spelled. Every release is
+tested by upgrading it OVER a world built by the previous release.
 
 ```sh
 wukong update

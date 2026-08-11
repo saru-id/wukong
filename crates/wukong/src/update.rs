@@ -7,7 +7,10 @@ use std::path::Path;
 
 const REPO: &str = "saru-id/wukong";
 
-pub fn run(check_only: bool) -> anyhow::Result<()> {
+pub fn run(check_only: bool, rollback: bool) -> anyhow::Result<()> {
+    if rollback {
+        return roll_back();
+    }
     let current = env!("CARGO_PKG_VERSION");
     let api = curl(&format!(
         "https://api.github.com/repos/{REPO}/releases/latest"
@@ -65,9 +68,18 @@ pub fn run(check_only: bool) -> anyhow::Result<()> {
         .map(std::path::Path::to_path_buf)
         .ok_or_else(|| anyhow::anyhow!("cannot locate the install directory"))?;
     for binary in ["wukong", "wukongd"] {
-        replace(&stage.join(binary), &bin_dir.join(binary))?;
+        let target = bin_dir.join(binary);
+        // Keep the outgoing pair: an upgrade that goes wrong is a
+        // ten-second `wukong update --rollback`, not an incident.
+        if target.is_file() {
+            let _ = std::fs::copy(&target, target.with_extension("prev"));
+        }
+        replace(&stage.join(binary), &target)?;
     }
-    println!("✓ binaries updated in {}", bin_dir.display());
+    println!(
+        "✓ binaries updated in {} (previous kept as .prev)",
+        bin_dir.display()
+    );
 
     // A running agent restarts onto the new daemon; without one, the
     // next start picks it up.
@@ -82,8 +94,62 @@ pub fn run(check_only: bool) -> anyhow::Result<()> {
             }
         );
     }
+    // The proof: does the daemon actually answer as the new version?
+    match wait_for_daemon_version() {
+        Some(version) => println!("✓ daemon answering as v{version}"),
+        None => println!(
+            "⚠ daemon not answering on the new version — read \
+             ~/.local/state/wukong/wukongd.log, and `wukong update --rollback` \
+             restores the previous binaries"
+        ),
+    }
     println!("updated to {tag}");
     Ok(())
+}
+
+/// Swap the `.prev` pair back and restart. If the newer daemon
+/// already migrated the database, the notice explains the way out —
+/// the database is rebuildable from the store.
+fn roll_back() -> anyhow::Result<()> {
+    let bin_dir = std::env::current_exe()?
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| anyhow::anyhow!("cannot locate the install directory"))?;
+    for binary in ["wukong", "wukongd"] {
+        let prev = bin_dir.join(binary).with_extension("prev");
+        anyhow::ensure!(
+            prev.is_file(),
+            "no previous binaries kept here — nothing to roll back to"
+        );
+        replace(&prev, &bin_dir.join(binary))?;
+    }
+    println!("✓ previous binaries restored");
+    if crate::launchd::agent_path().exists() {
+        crate::launchd::kickstart();
+    }
+    match wait_for_daemon_version() {
+        Some(version) => println!("✓ daemon answering as v{version}"),
+        None => println!(
+            "⚠ daemon not answering — if the newer version migrated the \
+             database, the older daemon refuses it. The database is \
+             rebuildable: delete ~/.local/share/wukong/wukong.db and the \
+             roster self-heals from the store (allowances re-quarantine)."
+        ),
+    }
+    Ok(())
+}
+
+/// Up to ten seconds for the (re)started daemon to answer, reporting
+/// the version it answers WITH.
+fn wait_for_daemon_version() -> Option<String> {
+    use wukong_core::ipc::{Request, Response};
+    for _ in 0..50 {
+        if let Ok(Response::Pong { daemon_version, .. }) = crate::client::call(Request::Ping) {
+            return Some(daemon_version);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    None
 }
 
 fn replace(new: &Path, target: &Path) -> anyhow::Result<()> {

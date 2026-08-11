@@ -380,7 +380,12 @@ fn parse(line: &str) -> Result<Request, Box<Response>> {
     match serde_json::from_str::<Envelope>(line) {
         Ok(env) if env.v == PROTOCOL_VERSION => Ok(env.req),
         Ok(_) => Err(Box::new(Response::Error {
-            message: "protocol version mismatch — restart wukongd".to_string(),
+            message: format!(
+                "protocol mismatch: this daemon speaks v{PROTOCOL_VERSION} — CLI and \
+daemon versions have drifted. `wukong update` brings both forward; \
+`wukong daemon stop && wukong daemon start` restarts onto the \
+installed binaries."
+            ),
         })),
         Err(e) => Err(Box::new(Response::Error {
             message: format!("bad request: {e}"),
