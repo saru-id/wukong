@@ -73,9 +73,9 @@ main() {
   fi
 
   say ""
-  say "Done. One command sets the whole machine up:"
+  say "Done. Just type it — the first run sets the whole machine up:"
   say ""
-  say "  wukong init"
+  say "  wukong"
   say ""
   say "(open a new terminal first, or: export PATH=\"\$HOME/.local/bin:\$PATH\")"
 }

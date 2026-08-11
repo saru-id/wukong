@@ -9,6 +9,20 @@ use std::path::PathBuf;
 
 const LABEL: &str = "id.saru.wukongd";
 
+/// Restart the agent's daemon in place (used after config changes and
+/// updates). True when launchctl accepted the kick.
+pub fn kickstart() -> bool {
+    let uid = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    std::process::Command::new("launchctl")
+        .args(["kickstart", "-k", &format!("gui/{uid}/{LABEL}")])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 pub fn agent_path() -> PathBuf {
     wukong_core::paths::home().join(format!("Library/LaunchAgents/{LABEL}.plist"))
 }

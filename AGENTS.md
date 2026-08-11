@@ -165,6 +165,15 @@ application that may sit nearby on disk as `../wukong-backup`).
   git). Quarantines add `redact`/`seal`. Never reintroduce a
   resolution whose blast radius depends on the item kind — that
   ambiguity is exactly what this vocabulary replaced.
+- **Setup is not a step.** `init::ensure_ready` runs from `preflight`
+  on the first REAL command (and bare `wukong`, which adds the
+  one-time welcome): config local-only, store, daemon, zero
+  questions. Read-shaped verbs (status/doctor/files/lists) must NEVER
+  set up as a side effect — they answer "not set up yet" honestly.
+  The remote is late-bindable via `wukong remote` (probe the remote
+  BEFORE bouncing the daemon — it may push the instant it restarts);
+  attach-later is safe because machine branches are per-machine and
+  the shared lane folds on the rebase path.
 - **`init` is the whole lifecycle; `sync` is the whole convergence.**
   init ends by offering `sync` (store has this machine's world) or
   `adopt` (machine brings a world in) — one command, one confirmation,

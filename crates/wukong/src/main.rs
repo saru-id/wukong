@@ -8,6 +8,7 @@ mod client;
 mod init;
 mod launchd;
 mod pkg_cli;
+mod remote;
 mod settings_cli;
 mod sync;
 mod tui;
@@ -49,16 +50,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Set this machine up, end to end
+    /// Set this machine up explicitly (first use does this on its own)
     #[command(
-        long_about = "The whole lifecycle in one command: detect the machine name, write \
-the starter config, create the mirror store repository (cloning your \
-remote if it has one), install the launchd agent, start the daemon — \
-and then offer the right next step. On a machine joining an existing \
-store that means `wukong sync` (files, packages, settings); on a fresh \
-machine it means `wukong adopt` (track the usual dotfiles, take in the \
-installed packages). Idempotent: run it again any time to repair a \
-half-configured machine."
+        long_about = "You don't need this command: the first real thing you do — bare \
+`wukong`, a track, an install — sets the machine up on its own, \
+local-only, zero questions. `wukong init` remains as the explicit \
+path: it also prompts for a remote (cloning an existing store — the \
+machine-two flow in one go), offers adopt/sync, and repairs a \
+half-configured machine. `--yes` makes it fully unattended."
     )]
     #[command(after_long_help = "EXAMPLES:\n  \
 wukong init                      one command, prompts along the way\n  \
@@ -408,6 +407,25 @@ wukong resolve 3 skip            not now")]
         id: i64,
         #[arg(value_enum, value_name = "RESOLUTION")]
         resolution: ResolutionArg,
+    },
+
+    /// Show or set the backup/sync remote
+    #[command(
+        long_about = "A machine starts local-only and fully working; the remote is a \
+choice you can make any time, not a setup question. `wukong remote \
+<url>` records it, walks the SSH key setup when the host isn't \
+reachable yet, restarts the daemon onto it, and then does the right \
+thing for what's over there: an empty repository starts receiving \
+this machine's history; a remote with an existing store offers \
+`wukong sync`. With no argument, shows the current remote."
+    )]
+    #[command(after_long_help = "EXAMPLES:\n  \
+wukong remote                                  what's configured\n  \
+wukong remote git@github.com:you/store.git     attach (or switch)")]
+    Remote {
+        /// git URL (omit to show the current remote)
+        #[arg(value_name = "URL")]
+        url: Option<String>,
     },
 
     /// Push the store to its remote now
@@ -913,10 +931,68 @@ fn run_settings(action: SettingsAction) -> anyhow::Result<()> {
     }
 }
 
+/// What an unconfigured machine does with each command class: real
+/// work sets the machine up on its own; questions get answers, not
+/// side effects.
+fn preflight(command: Option<&Command>) -> anyhow::Result<()> {
+    if !matches!(wukong_core::Config::load(), Ok(None)) {
+        return Ok(());
+    }
+    match command {
+        // Read-shaped commands must never install a daemon behind the
+        // user's back — they answer honestly instead.
+        Some(
+            Command::Status { .. }
+            | Command::Doctor { .. }
+            | Command::Files { .. }
+            | Command::Inbox { .. }
+            | Command::Resolve { .. }
+            | Command::Diff { .. }
+            | Command::Log { .. },
+        ) => {
+            anyhow::bail!("this machine isn't set up yet — type `wukong` to begin");
+        }
+        Some(Command::Pkg { action }) => {
+            if matches!(action, PkgAction::List { .. } | PkgAction::Providers { .. }) {
+                anyhow::bail!("this machine isn't set up yet — type `wukong` to begin");
+            }
+            init::ensure_ready().map(drop)
+        }
+        Some(Command::Settings { action }) => {
+            if matches!(action, SettingsAction::List { .. } | SettingsAction::Diff) {
+                anyhow::bail!("this machine isn't set up yet — type `wukong` to begin");
+            }
+            init::ensure_ready().map(drop)
+        }
+        // Their own flows handle the unconfigured case (or don't care).
+        None
+        | Some(
+            Command::Init { .. }
+            | Command::Daemon { .. }
+            | Command::Uninstall { .. }
+            | Command::Update { .. }
+            | Command::GenMan { .. }
+            | Command::GenCompletions { .. },
+        ) => Ok(()),
+        // Everything else is real work: first use IS setup.
+        Some(_) => init::ensure_ready().map(drop),
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    preflight(cli.command.as_ref())?;
     match cli.command {
-        None => tui::run(),
+        None => {
+            if init::ensure_ready()? {
+                init::first_run_welcome();
+            }
+            tui::run()
+        }
+        Some(Command::Remote { url }) => match url {
+            Some(url) => remote::set(&url),
+            None => remote::show(),
+        },
         Some(Command::Init { yes }) => init::run(yes),
         Some(Command::Sync { yes, dry_run }) => sync::run(yes, dry_run),
         Some(Command::Install {
@@ -1046,7 +1122,7 @@ fn status(json: bool) -> anyhow::Result<()> {
     println!(
         "remote    {}",
         if s.remote.is_empty() {
-            "(local only)"
+            "local-only — `wukong remote <url>` adds backup/sync"
         } else {
             &s.remote
         }
@@ -1130,8 +1206,13 @@ fn doctor() {
         paths::store_dir().join(".git").exists(),
         "store repo exists",
     );
-    check(!config.remote.is_empty(), "remote configured");
-    if !config.remote.is_empty() {
+    if config.remote.is_empty() {
+        check(
+            true,
+            "local-only (no remote — `wukong remote <url>` adds backup)",
+        );
+    } else {
+        check(true, "remote configured");
         check(remote_reachable(&config.remote), "remote reachable");
     }
     check(client::connected(), "daemon running");

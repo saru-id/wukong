@@ -32,7 +32,7 @@ check "man pages installed" "ls \"$HOME/.local/share/man/man1\" | grep -q 'wukon
 check "completions installed" "[ -f \"$HOME/.local/share/zsh/site-functions/_wukong\" ]"
 check "PATH line added to .zprofile" "grep -q '.local/bin' \"$HOME/.zprofile\""
 check "fpath line added to .zshrc" "grep -q 'site-functions' \"$HOME/.zshrc\""
-check "installer points at wukong init" "grep -q 'wukong init' \"$ROOT/install.log\""
+check "installer hands off to bare wukong" "grep -qx '  wukong' \"$ROOT/install.log\""
 
 # Round two: nothing duplicates.
 WUKONG_INSTALL_SOURCE="$ROOT/release.tar.gz" WUKONG_INSTALL_NO_CLT=1 sh install.sh > /dev/null 2>&1
@@ -49,6 +49,33 @@ if WUKONG_INSTALL_SOURCE="$ROOT/release.tar.gz" WUKONG_INSTALL_NO_CLT=1 sh insta
 else
   bad "local-source install broke on rerun"
 fi
+
+echo "=== zero-setup: the first real command sets the machine up"
+export XDG_CONFIG_HOME="$HOME/.config"
+export XDG_DATA_HOME="$HOME/.local/share"
+export XDG_STATE_HOME="$HOME/.local/state"
+W="$HOME/.local/bin/wukong"
+"$W" status > "$ROOT/status.log" 2>&1 || true
+check "read verbs answer honestly before setup" "grep -q 'set up yet' \"$ROOT/status.log\""
+check "read verbs have no side effects" "[ ! -f \"$XDG_CONFIG_HOME/wukong/config.toml\" ]"
+
+printf 'first tracked file\n' > "$HOME/.zerofile"
+WUKONG_NO_AGENT=1 "$W" track "$HOME/.zerofile" > "$ROOT/first.log" 2>&1
+check "first real command runs setup itself" "grep -q 'First run' \"$ROOT/first.log\""
+check "setup is local-only with the remote hint" "grep -q 'wukong remote' \"$ROOT/first.log\""
+check "config written by first use" "[ -f \"$XDG_CONFIG_HOME/wukong/config.toml\" ]"
+check "the command itself still worked" "grep -q 'tracking' \"$ROOT/first.log\""
+check "status now answers" "\"$W\" status | grep -q 'local-only'"
+
+echo "=== the remote attaches late, safely"
+git init -q --bare -b main "$ROOT/late-remote.git"
+WUKONG_NO_AGENT=1 "$W" remote "$ROOT/late-remote.git" > "$ROOT/remote.log" 2>&1
+check "remote persisted to config" "grep -q 'late-remote' \"$XDG_CONFIG_HOME/wukong/config.toml\""
+check "empty remote recognized" "grep -q 'empty repository' \"$ROOT/remote.log\""
+"$W" push > /dev/null 2>&1
+check "history pushed after late attach" "git -C \"$ROOT/late-remote.git\" branch | grep -q ."
+check "shared branch pushed too" "git -C \"$ROOT/late-remote.git\" rev-parse --verify -q shared > /dev/null"
+kill "$(cat "$XDG_STATE_HOME/wukong/wukongd.pid")" 2>/dev/null
 
 echo
 echo "RESULTS: $pass passed, $fail failed"

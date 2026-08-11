@@ -1,10 +1,10 @@
-//! `wukong init`: the whole lifecycle in one command. Detect the
-//! machine name, write the starter config, initialize the store repo —
-//! cloning the remote if it has one — install the launchd agent, start
-//! the daemon, and then offer the right next step: `sync` when the
-//! store already has this machine's world, `adopt` when the machine is
-//! the one bringing a world in. Idempotent: safe to run again to
-//! repair a half-set-up machine.
+//! Setup, in two shapes. `ensure_ready` is the invisible one: the
+//! first real command on a fresh machine sets everything up silently
+//! (config, store, daemon — local-only, zero questions) so "setup"
+//! stops being a step anyone performs. `wukong init` remains as the
+//! explicit verb — the interactive repair-and-automation path that
+//! also prompts for a remote and offers adopt/sync — but nobody has
+//! to know it exists.
 
 use std::io::{self, Write as _};
 use wukong_core::{Config, Store, paths};
@@ -83,31 +83,7 @@ pub fn run(yes: bool) -> anyhow::Result<()> {
         config.machine
     );
 
-    if std::env::var_os("WUKONG_NO_AGENT").is_some() {
-        // Drill escape hatch: the day-one rehearsal must exercise this
-        // exact code path without touching the real launchd. The
-        // daemon binary sits beside this one; its pid lands in the
-        // state dir so the sandbox can stop it.
-        let daemon = std::env::current_exe()?
-            .parent()
-            .map(|d| d.join("wukongd"))
-            .filter(|p| p.is_file())
-            .ok_or_else(|| anyhow::anyhow!("wukongd not found beside wukong"))?;
-        paths::ensure_private_dir(&paths::state_dir())?;
-        let child = std::process::Command::new(daemon)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-        std::fs::write(
-            paths::state_dir().join("wukongd.pid"),
-            child.id().to_string(),
-        )?;
-        println!("✓ daemon started directly (WUKONG_NO_AGENT)");
-    } else {
-        crate::launchd::install()?;
-        println!("✓ launchd agent installed and started");
-    }
+    start_daemon()?;
 
     // The right next step, offered here so setup is ONE command. Both
     // paths show their full plan and take one confirmation (--yes
@@ -133,8 +109,94 @@ pub fn run(yes: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Everything a fresh machine needs, with zero questions: config
+/// (local-only), store, daemon. The first real command calls this so
+/// setup stops being a step. Returns true when it actually set up.
+pub fn ensure_ready() -> anyhow::Result<bool> {
+    if !matches!(Config::load(), Ok(None)) {
+        return Ok(false);
+    }
+    println!("First run — setting this machine up…");
+    let machine = detect_machine();
+    Config::write_starter(&machine, "")?;
+    Store::open(&paths::store_dir(), &machine)?;
+    start_daemon()?;
+    wait_for_daemon();
+    println!("✓ config, store, and daemon ready (machine: {machine}, local-only)");
+    println!(
+        "  `wukong remote <url>` adds backup/sync whenever you're ready
+"
+    );
+    Ok(true)
+}
+
+/// The one-time welcome when the FIRST command was the bare dashboard:
+/// two skippable questions, then out of the way forever.
+pub fn first_run_welcome() {
+    use std::io::IsTerminal as _;
+    if !io::stdin().is_terminal() {
+        return;
+    }
+    let answer = prompt("Adopt this machine's dotfiles and installed packages now? [Y/n] ");
+    if !answer.eq_ignore_ascii_case("n") {
+        let _ = crate::adopt::run(true);
+    }
+    let url = prompt(
+        "
+Backup/sync remote (git URL; Enter to skip): ",
+    );
+    if !url.is_empty() {
+        let _ = crate::remote::set(&url);
+    }
+    println!();
+}
+
+/// Start the daemon: launchd in real life, a direct sibling spawn
+/// under `WUKONG_NO_AGENT` (the drills' escape hatch — pid in the state
+/// dir so sandboxes can stop and restart it).
+pub(crate) fn start_daemon() -> anyhow::Result<()> {
+    if std::env::var_os("WUKONG_NO_AGENT").is_some() {
+        let daemon = std::env::current_exe()?
+            .parent()
+            .map(|d| d.join("wukongd"))
+            .filter(|p| p.is_file())
+            .ok_or_else(|| anyhow::anyhow!("wukongd not found beside wukong"))?;
+        paths::ensure_private_dir(&paths::state_dir())?;
+        let child = std::process::Command::new(daemon)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        std::fs::write(
+            paths::state_dir().join("wukongd.pid"),
+            child.id().to_string(),
+        )?;
+        println!("✓ daemon started directly (WUKONG_NO_AGENT)");
+    } else {
+        crate::launchd::install()?;
+        println!("✓ launchd agent installed and started");
+    }
+    Ok(())
+}
+
+/// Bounce the daemon so it rereads the config (a newly attached
+/// remote, most importantly).
+pub(crate) fn restart_daemon() {
+    if std::env::var_os("WUKONG_NO_AGENT").is_some() {
+        let pidfile = paths::state_dir().join("wukongd.pid");
+        if let Ok(pid) = std::fs::read_to_string(&pidfile) {
+            let _ = std::process::Command::new("kill").arg(pid.trim()).status();
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
+        let _ = start_daemon();
+    } else if crate::launchd::agent_path().exists() {
+        crate::launchd::kickstart();
+    }
+    wait_for_daemon();
+}
+
 /// The launchd agent was just kicked; give the socket a moment.
-fn wait_for_daemon() -> bool {
+pub(crate) fn wait_for_daemon() -> bool {
     for _ in 0..25 {
         if crate::client::connected() {
             return true;
@@ -144,7 +206,7 @@ fn wait_for_daemon() -> bool {
     false
 }
 
-fn detect_machine() -> String {
+pub(crate) fn detect_machine() -> String {
     std::process::Command::new("scutil")
         .args(["--get", "ComputerName"])
         .output()
@@ -159,7 +221,7 @@ fn detect_machine() -> String {
 
 /// A quick, prompt-free reachability check; failure is advisory only
 /// (the machine may simply be offline right now).
-fn remote_reachable(remote: &str) -> bool {
+pub(crate) fn remote_reachable(remote: &str) -> bool {
     std::process::Command::new("git")
         .args(["ls-remote", "--heads", remote])
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -171,7 +233,7 @@ fn remote_reachable(remote: &str) -> bool {
 /// the whole path here — find or create an SSH key, hand over the
 /// public half, re-probe — instead of failing with a git error and
 /// homework.
-fn ssh_wizard(remote: &str) {
+pub(crate) fn ssh_wizard(remote: &str) {
     println!("  {remote} is not reachable from this machine yet.");
     let ssh_dir = paths::home().join(".ssh");
     let pubkey = ["id_ed25519.pub", "id_rsa.pub", "id_ecdsa.pub"]
@@ -237,7 +299,7 @@ fn ssh_wizard(remote: &str) {
     println!("  keeping the remote; pushes will retry once access works");
 }
 
-fn prompt(message: &str) -> String {
+pub(crate) fn prompt(message: &str) -> String {
     print!("{message}");
     let _ = io::stdout().flush();
     let mut line = String::new();

@@ -72,14 +72,7 @@ pub fn run(check_only: bool) -> anyhow::Result<()> {
     // A running agent restarts onto the new daemon; without one, the
     // next start picks it up.
     if crate::launchd::agent_path().exists() {
-        let uid =
-            String::from_utf8_lossy(&std::process::Command::new("id").arg("-u").output()?.stdout)
-                .trim()
-                .to_string();
-        let ok = std::process::Command::new("launchctl")
-            .args(["kickstart", "-k", &format!("gui/{uid}/id.saru.wukongd")])
-            .status()
-            .is_ok_and(|s| s.success());
+        let ok = crate::launchd::kickstart();
         println!(
             "{}",
             if ok {

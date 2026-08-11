@@ -154,11 +154,11 @@ completions):
 curl -fsSL https://raw.githubusercontent.com/saru-id/wukong/main/install.sh | sh
 ```
 
-Then one command sets the whole machine up — including a guided SSH
-key setup when the store remote isn't reachable yet:
+Then just type it — the first run sets the whole machine up (a
+guided SSH key setup appears if and when a remote needs it):
 
 ```sh
-wukong init
+wukong
 ```
 
 Staying current is a decision, never a background surprise:
@@ -182,21 +182,23 @@ behavior. Leaving is as clean as arriving:
 
 ## Getting started
 
-Six words cover daily life: `init`, `wukong` (the inbox), `track`,
-`install`, `sync`, `status`. Everything else is depth you reach for.
+There is no setup step. The first real thing you do — typing
+`wukong`, tracking a file, installing a package — sets the machine up
+on its own: config, store, daemon, local-only, zero questions. Six
+words cover daily life: `wukong` (the inbox), `track`, `install`,
+`sync`, `remote`, `status`. Everything else is depth you reach for.
 
 ```sh
-cargo build --release             # or grab the release tarball
-./target/release/wukong init      # the whole setup, one command
-wukong                            # the dashboard
+wukong                            # first run: sets up, offers adopt — then it's the dashboard
 ```
 
-`init` writes the config, starts the daemon, and offers the right next
-step itself: on a fresh machine that's `wukong adopt` (track the usual
-dotfiles, take in every installed package); on a machine joining an
-existing store it's `wukong sync` (restore files, install missing
-packages, apply settings — one plan, one confirmation). `--yes`
-accepts everything, for unattended installs.
+A machine starts local-only and fully working. `wukong remote <url>`
+attaches backup/sync whenever you're ready (safe by construction —
+machine branches can't collide, and the shared lane folds in on the
+rebase path): an empty repository starts receiving this machine's
+history on its own; a remote with an existing store offers `wukong
+sync`. `wukong init` still exists for scripted installs (`--yes`) and
+repair, but nobody needs to know that.
 
 Every inbox decision uses the same three words: **approve** says yes,
 **never** is always the permanent opt-out (exclude the path, never
