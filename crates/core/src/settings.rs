@@ -1069,6 +1069,10 @@ const NOISE_KEY_MARKERS: &[&str] = &[
     "TrialArm",
     "CKPerBootTasks",
     "seed-",
+    // The Dock bumps this on every change it makes to itself; it is a
+    // counter, not a preference. Anchored exactly — a bare "count"
+    // would eat settings like a recent-items limit.
+    "mod-count",
 ];
 
 /// Whole domains that are pure churn.
@@ -1081,6 +1085,9 @@ const NOISE_DOMAINS: &[&str] = &[
     "com.apple.identityservices.idstatuscache",
     "com.apple.CloudKit",
     "com.apple.security.KCN",
+    // CloudDocs' daemon, whose per-container notification keys flip as
+    // iCloud syncs and have nothing to do with what the user set.
+    "com.apple.bird",
 ];
 
 /// Is this changed key app furniture rather than a setting?
@@ -1174,6 +1181,18 @@ mod tests {
         assert!(is_noise_key("com.apple.finder", "NSWindow Frame main"));
         assert!(is_noise_key("com.apple.dock", "SULastCheckTime"));
         assert!(is_noise_key("com.apple.spaces", "anything"));
+        // Found by flipping real toggles in System Settings: the Dock
+        // bumps a counter on every change it makes to itself, and
+        // CloudDocs' daemon flips per-container notification keys as
+        // iCloud syncs. Both arrived as "signal" in a live capture.
+        assert!(is_noise_key("com.apple.dock", "mod-count"));
+        assert!(is_noise_key(
+            "com.apple.bird.containers.notifications",
+            "user_uid_501_iCloud_is_workflow_my_workflows_foreground"
+        ));
+        // …and the anchor is the chaff form, so a real count survives.
+        assert!(!is_noise_key("com.apple.dock", "recent-count"));
+        assert!(!is_noise_key("NSGlobalDomain", "NSWindowCount"));
         // Real settings survive.
         assert!(!is_noise_key("com.apple.dock", "autohide"));
         assert!(!is_noise_key("NSGlobalDomain", "KeyRepeat"));

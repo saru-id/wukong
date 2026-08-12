@@ -155,21 +155,30 @@ impl Engine {
         Response::Ok { message }
     }
 
-    /// Capture phase 2: diff reality against the snapshot, classify
-    /// noise, consume the snapshot.
+    /// Capture phase 2: diff reality against the snapshot and classify
+    /// noise. The snapshot SURVIVES its diff, until the TTL retires it.
+    ///
+    /// It used to be consumed here, which made the diff's own closing
+    /// line — "N noisy change(s) filtered — --all shows them" — a
+    /// promise the next command could not keep: by then there was no
+    /// snapshot left to show anything from, and the only way to see
+    /// what was filtered was to capture again and redo the change in
+    /// System Settings. Re-diffing an unexpired snapshot is exactly
+    /// what that instruction asks for.
     pub(super) fn capture_diff(&mut self) -> Response {
         let Some(prefs_dir) = self.prefs_dir.clone() else {
             return Response::Error {
                 message: "settings governance is disabled in config".to_string(),
             };
         };
-        let Some((taken, snapshot)) = self.capture.take() else {
+        let Some((taken, snapshot)) = self.capture.clone() else {
             return Response::Error {
                 message: "no capture in progress — start with `wukong settings capture`"
                     .to_string(),
             };
         };
         if taken.elapsed() > CAPTURE_TTL {
+            self.capture = None;
             return Response::Error {
                 message: "capture snapshot expired (10 minutes) — start again".to_string(),
             };

@@ -160,9 +160,11 @@ application that may sit nearby on disk as `../wukong-backup`).
   of app-state noise would drown the inbox. Apply passes plist text
   to `defaults write`, no type flag. The corpus (crates/core/src/settings.rs) carries label and
   restart knowledge only; desired values live in the manifest.
-- **Capture is bounded and one-shot.** The snapshot lives only in
-  daemon memory, expires after 10 minutes, and is consumed by the
-  diff. The noise filter (settings.rs NOISE_*) is curated and tested
+- **Capture is bounded, and it outlives its diff.** The snapshot lives
+  only in daemon memory and expires after 10 minutes; the diff reads it
+  without consuming it, because the diff's own closing line points the
+  user at `--all` and there has to be a snapshot left for that command
+  to read. The noise filter (settings.rs NOISE_*) is curated and tested
   against the whole corpus — every corpus key must classify as signal;
   when adding markers, anchor on the chaff form ("NSToolbar
   Configuration", not "NSToolbar") or real settings get eaten.

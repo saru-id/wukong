@@ -162,6 +162,7 @@ sleep 3
 check "restored layout re-acknowledges silently" "[ \"\$(inbox_count)\" = 0 ]"
 
 echo "=== capture: snapshot, change, diff, record"
+check "a diff with no capture at all errors" "! \"$W\" settings capture --diff > /dev/null 2>&1"
 "$W" settings capture --start > /dev/null
 pref com.apple.screencapture type str png
 pref org.some.app "NSWindow Frame main" str "0 0 100 100"
@@ -172,7 +173,9 @@ check "corpus label rides along" "grep -q 'screenshots' '$CAPF' || grep -q 'Save
 check "noise excluded from signal json" "! grep -q NSWindow '$CAPF'"
 "$W" settings record com.apple.screencapture type > /dev/null
 check "captured key recorded into manifest" "grep -q 'screencapture' '$MANIFEST'"
-check "second diff without start errors" "! \"$W\" settings capture --diff > /dev/null 2>&1"
+# A snapshot outlives its diff — the diff tells you to run `--all`, so
+# there has to be something left for that to read.
+check "a second diff still answers" "\"$W\" settings capture --diff > /dev/null 2>&1"
 
 echo "=== list --json"
 check "settings list --json parses" "\"$W\" settings list --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d,list) and len(d)>=88'"
@@ -181,6 +184,23 @@ echo "=== manifest syncs through the store"
 "$W" push > /dev/null
 git clone -q -b sandbox "$ROOT/remote.git" "$ROOT/verify"
 check "remote carries the settings manifest" "grep -q 'fancyMode' '$ROOT/verify/__wukong__/settings.toml'"
+
+echo "=== the diff's own advice has to work"
+# The diff closes with "N noisy change(s) filtered — --all shows them".
+# That is a command, and there has to be a snapshot left for it to read.
+"$W" settings capture --start > /dev/null
+pref com.apple.dock autohide bool true
+pref com.apple.dock mod-count int 7
+pref com.apple.bird.containers.notifications some_container bool true
+sleep 1
+"$W" settings capture --diff > "$ROOT/cap1.txt" 2>&1
+check "the diff reports the real setting" "grep -q 'autohide' \"$ROOT/cap1.txt\""
+check "and filters the bookkeeping counter" "! grep -q 'mod-count' \"$ROOT/cap1.txt\""
+check "and filters CloudDocs container churn" "! grep -q 'some_container' \"$ROOT/cap1.txt\""
+"$W" settings capture --diff --all > "$ROOT/cap2.txt" 2>&1
+check "--all still answers AFTER the diff" "grep -q 'autohide' \"$ROOT/cap2.txt\""
+check "…and shows what the diff filtered" \
+  "grep -q 'mod-count' \"$ROOT/cap2.txt\" && grep -q 'some_container' \"$ROOT/cap2.txt\""
 
 kill $DPID 2>/dev/null
 echo

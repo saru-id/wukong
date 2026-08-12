@@ -750,7 +750,7 @@ fn settings_record_takes_arbitrary_keys_and_list_reports_drift() {
 }
 
 #[test]
-fn capture_diffs_signal_from_noise_and_is_one_shot() {
+fn capture_diffs_signal_from_noise_and_survives_its_diff() {
     let (mut rig, prefs) = settings_rig();
     write_pref(
         &prefs,
@@ -800,8 +800,14 @@ fn capture_diffs_signal_from_noise_and_is_one_shot() {
     // Signal sorts before noise.
     assert!(!changes[0].noise);
 
-    // The snapshot was consumed: a second diff errors.
-    assert!(matches!(rig.engine.capture_diff(), Response::Error { .. }));
+    // The snapshot SURVIVES its diff. The diff's closing line tells the
+    // user "--all shows them" about the filtered changes, and that is
+    // the command it is asking for — consuming the snapshot here made
+    // it a promise the next command could not keep.
+    let Response::CaptureDiff { changes: again } = rig.engine.capture_diff() else {
+        panic!("a second diff must still answer");
+    };
+    assert_eq!(again.len(), changes.len(), "and answer the same thing");
 }
 
 #[test]
