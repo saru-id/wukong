@@ -280,6 +280,36 @@ pub fn sync(yes: bool, dry_run: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Drop a manifest entry, touching nothing on the machine.
+///
+/// Refused for a package that IS installed, because forgetting one is
+/// not a stable state: the next reconcile sees an installed package
+/// the manifest does not want and offers it for adoption all over
+/// again. `ignore` is the verb that makes that silence stick, and `rm`
+/// is the verb that makes the package actually go away.
+pub fn forget(name: &str, provider: Provider) -> anyhow::Result<()> {
+    let subject = wukong_core::pkg::subject(provider, name);
+    let entry = fetch()?
+        .into_iter()
+        .find(|e| e.provider == provider && e.name == name);
+    match entry {
+        None => anyhow::bail!("{subject} is not in the manifest — `wukong pkg list` shows what is"),
+        Some(e) if e.installed => anyhow::bail!(
+            "{subject} is installed on this machine, so forgetting it would \
+             only get it offered for adoption again.\n  \
+             wukong pkg ignore {name}   never be asked about it\n  \
+             wukong rm {name}           uninstall it and drop it"
+        ),
+        Some(_) => crate::say(Request::PkgRecord {
+            provider,
+            name: name.to_string(),
+            remove: true,
+            shared: false,
+            observe_only: false,
+        }),
+    }
+}
+
 pub fn adopt_installed() -> anyhow::Result<()> {
     crate::say(Request::PkgAdoptInstalled)
 }

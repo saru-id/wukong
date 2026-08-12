@@ -728,6 +728,33 @@ wholesale."
     )]
     AdoptInstalled,
 
+    /// Drop an entry from the manifest, leaving the machine alone
+    #[command(
+        long_about = "The repair verb: take a package OUT of the manifest without \
+uninstalling anything. For entries that describe something no longer \
+real — a package renamed upstream, a hand-edited typo, an entry no \
+detector can ever match — which otherwise read as permanently missing \
+in `pkg list` and are retried by every `pkg sync`.\n\n\
+Only for entries that are NOT installed. A package that IS installed \
+would simply be offered for adoption again on the next reconcile: use \
+`wukong pkg ignore` to stop being asked, or `wukong rm` to uninstall it \
+for real."
+    )]
+    #[command(after_long_help = "EXAMPLES:\n  \
+wukong pkg forget ghostty                     drop a phantom formula entry\n  \
+wukong pkg forget --cask oldcask              name the kind explicitly")]
+    Forget {
+        /// Package name, exactly as the manifest spells it
+        #[arg(value_name = "PACKAGE")]
+        name: String,
+        /// Which provider's entry to drop (default: brew formula)
+        #[arg(long, value_enum, conflicts_with = "cask")]
+        via: Option<pkg_cli::ViaArg>,
+        /// Shorthand for --via cask
+        #[arg(long)]
+        cask: bool,
+    },
+
     /// Where every provider is observed, and why (or why not)
     #[command(
         long_about = "One row per provider: the root wukong watches, how it was found \
@@ -1044,6 +1071,10 @@ fn run_pkg(action: PkgAction) -> anyhow::Result<()> {
                 name,
                 undo,
             })
+        }
+        PkgAction::Forget { name, via, cask } => {
+            let (name, named) = name_and_provider(&name, via, cask);
+            pkg_cli::forget(&name, named.unwrap_or(wukong_core::pkg::Provider::Formula))
         }
         PkgAction::Ignore { name, via } => pkg_cli::ignore(&name, via.into(), false),
         PkgAction::Unignore { name, via } => pkg_cli::ignore(&name, via.into(), true),

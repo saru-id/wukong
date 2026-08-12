@@ -1561,9 +1561,18 @@ fn empty_db_with_populated_store_self_heals() {
         "store-only file must NOT be tracked (phantom-removal hazard)"
     );
     let items = engine.db.inbox_open().unwrap();
+    let notice = items
+        .iter()
+        .find(|i| i.subject == "database")
+        .expect("self-heal must be loud");
+    // A tracked file held in quarantine never reached the store, so the
+    // rebuild cannot find it and it stops being tracked at all. The
+    // notice has to say so — a roster that quietly shrinks is worse
+    // than one that never healed.
     assert!(
-        items.iter().any(|i| i.subject == "database"),
-        "self-heal must be loud: {items:?}"
+        notice.body.contains("quarantine"),
+        "the notice must name what cannot come back: {}",
+        notice.body
     );
 }
 

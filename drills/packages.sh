@@ -124,13 +124,28 @@ ID=$(sqlite3 "$DB" "SELECT id FROM inbox WHERE resolved=0 AND subject='cask:ghos
 check "one manifest entry, under the kind that can reinstall it" \
   "grep -q 'ghostty' '$MANIFEST' && [ \"\$(grep -c 'ghostty' '$MANIFEST')\" = 1 ]"
 
+echo "=== forget: the repair verb, and what it refuses"
+"$W" pkg forget --cask ghostty > "$ROOT/forget-installed.log" 2>&1
+check "forgetting an INSTALLED package is refused, naming both real options" \
+  "grep -q 'pkg ignore' \"$ROOT/forget-installed.log\" && grep -q 'wukong rm' \"$ROOT/forget-installed.log\""
+check "…and the refusal leaves the manifest alone" "grep -q 'ghostty' '$MANIFEST'"
+"$W" pkg forget nothing-here > "$ROOT/forget-absent.log" 2>&1
+check "forgetting what was never there says so" \
+  "grep -q 'not in the manifest' \"$ROOT/forget-absent.log\""
+
 echo "=== manifest member vanishes"
 rm -rf "$ROOT/brew/Cellar/ripgrep"
 sleep 3
 check "removal offered" "sqlite3 '$DB' \"SELECT kind FROM inbox WHERE resolved=0\" | grep -q 'package-gone'"
 ID=$(sqlite3 "$DB" "SELECT id FROM inbox WHERE resolved=0 LIMIT 1")
-"$W" resolve "$ID" approve > /dev/null
-check "manifest dropped ripgrep" "! grep -q ripgrep '$MANIFEST'"
+# Skip, not approve: the entry stays wanted while nothing on disk
+# matches it — a genuine phantom, the state `forget` exists for.
+"$W" resolve "$ID" skip > /dev/null
+check "skipping keeps the entry so sync can reinstall it" "grep -q ripgrep '$MANIFEST'"
+check "and it reads as missing" "\"$W\" pkg list | grep -q '^! ripgrep'"
+"$W" pkg forget ripgrep > /dev/null 2>&1
+check "forget drops the phantom" "! grep -q ripgrep '$MANIFEST'"
+check "…and nothing is left missing" "! \"$W\" pkg list | grep -q '^!'"
 
 echo "=== language providers: watcher-driven adoption"
 mkdir -p "$ROOT/npmroot/@biomejs/biome"

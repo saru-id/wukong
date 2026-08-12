@@ -186,6 +186,11 @@ fn self_heal_roster(db: &Db, store: &Store) {
             "the database was empty — roster rebuilt from the store",
             &format!(
                 "{healed} file(s) re-tracked from the store{waiting_note}.\n\n\
+                 The store is the only thing left to rebuild from, so anything \
+                 that never reached it is gone: a file that was tracked but \
+                 HELD in quarantine has no commit to be found in, and is no \
+                 longer tracked at all. Compare `wukong files` against what you \
+                 remember and re-track what is missing.\n\n\
                  Sticky secret decisions (allowances) were lost on purpose: \
                  previously approved tokens will re-quarantine once, which is \
                  the safe direction.\n\n\
