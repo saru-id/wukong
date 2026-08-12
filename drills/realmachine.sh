@@ -114,10 +114,12 @@ BYHOST="$REAL_HOME/Library/Preferences/ByHost"
 if [ -d "$BYHOST" ]; then
   N=$(find "$BYHOST" -name '*.plist' | wc -l | tr -d ' ')
   note "$N ByHost domain(s) on this machine — none are governable today"
-  echo "        Known real settings that live there: com.apple.controlcenter"
-  echo "        (menu-bar module visibility), com.apple.loginwindow. If the"
+  echo "        Measured, not assumed: com.apple.controlcenter's INTERESTING"
+  echo "        keys are in the plain domain; ByHost holds its bentoboxes"
+  echo "        layout and com.apple.loginwindow's MiniBuddyLaunch. If the"
   echo "        corpus ever grows a ByHost key, the reader must resolve the"
-  echo "        hardware UUID; a plain domain read will silently miss it."
+  echo "        hardware UUID; a plain domain read will silently miss it,"
+  echo "        which reads as 'unset' rather than as an error."
 else
   note "no ByHost directory on this machine"
 fi

@@ -39,10 +39,12 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
   not track — your shell startup files, `~/.config`, launchd agents —
   and when an installer edits one, it lands in the inbox as
   "changed — start tracking it?".
-- **The inbox, everywhere.** The TUI opens on it (diffs inline,
-  `a`/`r`/`i` to resolve, `x` to exclude a noisy subtree for good);
-  `wukong status` prints the count; a macOS notification fires only on
-  new items.
+- **The inbox, everywhere.** One vocabulary, whatever the item:
+  `a`pprove says yes, `n`ever is the permanent opt-out, `s`kip is
+  always harmless. Quarantines add `r`edact and s`e`al. The TUI opens
+  on the inbox with diffs inline and `x` to exclude a noisy subtree
+  for good; `wukong status` prints the count; a macOS notification
+  fires only on new items.
 - **Built to be inspected.** `wukong diff` shows live vs stored,
   `wukong log` shows a file's commit history, `wukong status` says how
   long ago the last push landed — the daemon is auditable from any
@@ -62,7 +64,10 @@ hardcoded machine names, and a `wukong init` that works on any Mac.
 - **Install through wukong, never lose track.** `wukong install jq`
   runs brew (its output streams through untouched) and records the
   package in a manifest that lives in the store — committed, pushed,
-  and historied like every dotfile. `wukong rm` is the reverse.
+  and historied like every dotfile. What gets recorded is what brew
+  actually poured, not what you typed: `wukong install ghostty`
+  remembers a cask, `wukong install delta` remembers `git-delta`.
+  `wukong rm` is the reverse.
   `--no-track` opts a single install out, and `--via` picks any of
   the fourteen providers: brew formulae and casks, apps (App Store
   and drag-installed), and global npm, pnpm, bun, cargo, go, gem,
@@ -163,6 +168,15 @@ confirmations — not to defend against a fully hostile member.
   changed, app furniture filtered out. Record what you choose, and
   from then on it's governed like a corpus member. The corpus is a
   seed, not a ceiling.
+- The boundary, stated: wukong reads and writes plain preference
+  domains. Per-host settings — the ones `defaults -currentHost`
+  reaches, stored under `~/Library/Preferences/ByHost` and keyed by
+  the machine's hardware UUID — are not reachable, and neither are
+  preferences sealed inside an app's sandbox container. Capture will
+  not show them and `settings record` cannot govern them. Most of
+  what you would want is in the plain domains; the notable per-host
+  holdouts are Control Center's menu-bar box layout and a handful of
+  login-window behaviours.
 
 ## Layout
 

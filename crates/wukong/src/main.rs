@@ -1388,7 +1388,10 @@ fn inbox(json: bool) -> anyhow::Result<()> {
     for item in items {
         println!("#{}  {}  {}", item.id, item.subject, item.detail);
     }
-    println!("\nresolve with `wukong resolve <id> approve|redact|ignore`");
+    // The vocabulary, spelled the way `resolve` actually accepts it.
+    // Quarantines add redact and seal; `resolve --help` has the full
+    // meaning of each word per item kind.
+    println!("\nresolve with `wukong resolve <id> approve|never|skip`");
     Ok(())
 }
 

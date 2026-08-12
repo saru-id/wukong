@@ -604,11 +604,22 @@ impl Engine {
 /// metadata. Absent (fake apps, indexing off) reads as "no id" — the
 /// adoption still lands, sync just can't install it.
 fn mas_id(applications: &Path, name: &str) -> Option<String> {
-    let out = std::process::Command::new("mdls")
-        .args(["-raw", "-name", "kMDItemAppStoreAdamID"])
-        .arg(applications.join(format!("{name}.app")))
-        .output()
-        .ok()?;
-    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (out.status.success() && !id.is_empty() && id.chars().all(|c| c.is_ascii_digit())).then_some(id)
+    // On the event loop, so it gets a deadline like every other fork:
+    // a wedged Spotlight costs this adoption its id, never the daemon.
+    let bundle = applications.join(format!("{name}.app"));
+    let id = wukong_core::proc::bounded_output(
+        "mdls",
+        &[
+            "-raw",
+            "-name",
+            "kMDItemAppStoreAdamID",
+            &bundle.to_string_lossy(),
+        ],
+        MDLS_TIMEOUT_SECS,
+    )?;
+    let id = id.trim().to_string();
+    (!id.is_empty() && id.chars().all(|c| c.is_ascii_digit())).then_some(id)
 }
+
+/// Spotlight answers instantly or it is not going to.
+const MDLS_TIMEOUT_SECS: u64 = 10;
