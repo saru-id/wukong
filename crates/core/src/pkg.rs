@@ -695,15 +695,27 @@ fn language_roots(roots: &mut Roots, overrides: &BTreeMap<String, PathBuf>, home
                 .or_else(|| Some(home.join("go/bin")))
         },
     );
-    // Gem.user_dir is ~/.gem/<engine>/<ruby version> on every ruby
-    // install method; take the newest version dir.
+    // RubyGems' user dir moved: modern versions honour XDG and put it
+    // at $XDG_DATA_HOME/gem/ruby/<version>, older ones use
+    // ~/.gem/ruby/<version>. Probing only the old path means a machine
+    // with current Homebrew ruby has a live gem provider reporting
+    // "not found" — and `gem install --user-install` landing somewhere
+    // wukong never looks. Try both, newest version dir in each.
     push_root(
         roots,
         overrides,
         Provider::Gem,
         RootKind::GemSpecs,
         RootOrigin::Probed,
-        &mut || newest_dir(&home.join(".gem/ruby")),
+        // Derived from the injected home, never from the ambient
+        // XDG_DATA_HOME: detection has to be a pure function of the
+        // paths it is given, or a developer's own machine leaks into
+        // the suite. A ruby somewhere unusual is what the
+        // [packages.roots] override is for.
+        &mut || {
+            newest_dir(&home.join(".local/share/gem/ruby"))
+                .or_else(|| newest_dir(&home.join(".gem/ruby")))
+        },
     );
     push_root(
         roots,
@@ -1438,6 +1450,39 @@ mod detector_tests {
         assert_eq!(npm_root.map(|r| r.path.clone()), Some(npm));
         assert_eq!(npm_root.map(|r| r.origin), Some(RootOrigin::Override));
         assert!(!roots.active.iter().any(|r| r.provider == Provider::Cargo));
+    }
+
+    #[test]
+    fn gem_is_found_where_modern_rubygems_actually_puts_it() {
+        // RubyGems' user dir moved to $XDG_DATA_HOME/gem/ruby/<ver>.
+        // Probing only ~/.gem/ruby meant a machine with current
+        // Homebrew ruby reported the gem provider as "not found" while
+        // `gem install --user-install` was landing in plain sight.
+        for layout in [".local/share/gem/ruby/4.0.0", ".gem/ruby/3.3.0"] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let home = tmp.path().join("home");
+            std::fs::create_dir_all(home.join(layout).join("specifications")).unwrap();
+            std::fs::write(
+                home.join(layout).join("specifications/paint-2.3.0.gemspec"),
+                b"Gem::Specification",
+            )
+            .unwrap();
+            let mut overrides = BTreeMap::new();
+            overrides.insert("npm".to_string(), tmp.path().join("absent"));
+            overrides.insert("pnpm".to_string(), tmp.path().join("absent"));
+            let roots = detect_roots(None, None, &overrides, &home);
+            let gem = roots
+                .status()
+                .into_iter()
+                .find(|s| s.provider == Provider::Gem)
+                .unwrap();
+            assert!(gem.active, "gem root not found for layout {layout}");
+            assert!(
+                gem.path.as_deref().is_some_and(|p| p.ends_with(layout)),
+                "wrong gem root for {layout}: {:?}",
+                gem.path
+            );
+        }
     }
 
     #[test]

@@ -2001,3 +2001,27 @@ fn setting_offers_for_keys_that_no_longer_exist_are_withdrawn_at_startup() {
         "the key that still holds a value keeps its offer"
     );
 }
+
+/// "tracking" has to mean it will be committed. The commit path caps
+/// size too, but only by logging and skipping — so `track` answered
+/// yes, `files` listed it, and the store never saw a byte.
+#[test]
+fn an_oversized_file_is_refused_where_the_user_can_see_it() {
+    let mut rig = rig();
+    let big = rig.home.join(".huge.conf");
+    std::fs::write(&big, vec![b'x'; MAX_TRACKED_BYTES + 1]).unwrap();
+    let resp = rig.engine.track(big.to_str().unwrap(), false, false);
+    let Response::Error { message } = resp else {
+        panic!("expected a refusal, got {resp:?}");
+    };
+    assert!(message.contains("cap"), "{message}");
+    assert!(
+        !rig.engine.tracked_live.contains(&big),
+        "a refused file must not be in the roster"
+    );
+
+    // One byte under, and it is governed like anything else.
+    std::fs::write(&big, vec![b'x'; MAX_TRACKED_BYTES]).unwrap();
+    let resp = rig.engine.track(big.to_str().unwrap(), false, false);
+    assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
+}

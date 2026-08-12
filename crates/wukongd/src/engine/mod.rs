@@ -1382,6 +1382,22 @@ machine that holds the identity (and push)"
                 };
             }
         };
+        // Refuse at the moment the user is looking. The commit path
+        // enforces this cap too, but only by logging and skipping —
+        // which means `track` answered "tracking", `wukong files`
+        // listed the file, and nothing ever reached the store, with
+        // the sole evidence a line in a log nobody reads.
+        if bytes.len() > MAX_TRACKED_BYTES {
+            return Response::Error {
+                message: format!(
+                    "refused: {} is {} MB, over the {} MB cap for a tracked file — \
+                     wukong governs dotfiles, not payloads",
+                    paths::display(&live),
+                    bytes.len() / (1024 * 1024),
+                    MAX_TRACKED_BYTES / (1024 * 1024),
+                ),
+            };
+        }
         let content = String::from_utf8_lossy(&bytes);
         if !sealed && let GateVerdict::Forbidden(why) = gate::scan(&live, &content) {
             return Response::Error {
