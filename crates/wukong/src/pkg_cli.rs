@@ -61,20 +61,65 @@ pub(crate) fn run_tool(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn install(name: &str, provider: Provider, no_track: bool, shared: bool) -> anyhow::Result<()> {
+/// The identity to install or remove under. `explicit` is the kind
+/// the user named, `None` when they only typed a name.
+///
+/// Homebrew resolves aliases and cask tokens for its own commands, so
+/// the name the user types is not necessarily the name that lands on
+/// disk. Asking brew first is what keeps the manifest describing
+/// reality; brew is asked once, on an explicit user action, under a
+/// wall clock, and a brew that cannot answer (offline, absent, an
+/// unknown name) leaves the typed identity alone — the install itself
+/// is about to report the real error.
+fn brew_resolve(name: &str, explicit: Option<Provider>) -> (Provider, String) {
+    let fallback = explicit.unwrap_or(Provider::Formula);
+    if !matches!(fallback, Provider::Formula | Provider::Cask) {
+        return (fallback, name.to_string());
+    }
+    let Some(json) = wukong_core::pkg::bounded_output(
+        "brew",
+        &["info", "--json=v2", name],
+        BREW_INFO_TIMEOUT_SECS,
+    ) else {
+        return (fallback, name.to_string());
+    };
+    let Some((provider, real)) = wukong_core::pkg::brew_identity(&json, explicit) else {
+        return (fallback, name.to_string());
+    };
+    if provider != fallback || real != name {
+        println!(
+            "{name} is {}:{real} — installing and recording it as that",
+            provider.as_str()
+        );
+    }
+    (provider, real)
+}
+
+/// `brew info` reads local metadata but may reach for the API; a hung
+/// brew must not hang the CLI before the install has even started.
+const BREW_INFO_TIMEOUT_SECS: u64 = 15;
+
+pub fn install(
+    name: &str,
+    explicit: Option<Provider>,
+    no_track: bool,
+    shared: bool,
+) -> anyhow::Result<()> {
+    let (provider, name) = brew_resolve(name, explicit);
     let args = provider
-        .install_args(name)
+        .install_args(&name)
         .ok_or_else(|| anyhow::anyhow!("{} cannot install", provider.as_str()))?;
     run_tool(&args)?;
     // Even an untracked install is ACKNOWLEDGED to the daemon —
     // otherwise the watcher would offer it for adoption seconds after
     // the user explicitly opted out.
-    record(provider, name, false, shared, no_track);
+    record(provider, &name, false, shared, no_track);
     Ok(())
 }
 
-pub fn rm(name: &str, provider: Provider) -> anyhow::Result<()> {
-    let args = provider.uninstall_args(name).ok_or_else(|| {
+pub fn rm(name: &str, explicit: Option<Provider>) -> anyhow::Result<()> {
+    let (provider, name) = brew_resolve(name, explicit);
+    let args = provider.uninstall_args(&name).ok_or_else(|| {
         anyhow::anyhow!(
             "{} has no uninstall command — delete it yourself, and the \
              daemon will offer to drop {name} from the manifest",
@@ -82,7 +127,7 @@ pub fn rm(name: &str, provider: Provider) -> anyhow::Result<()> {
         )
     })?;
     run_tool(&args)?;
-    record(provider, name, true, false, false);
+    record(provider, &name, true, false, false);
     Ok(())
 }
 

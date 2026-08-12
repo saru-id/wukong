@@ -93,11 +93,13 @@ wukong sync --yes                no questions asked")]
     #[command(
         long_about = "Run the provider's own installer (its output streams through \
 untouched) and record the package in the manifest, which commits and \
-syncs like every dotfile. Homebrew formulae by default; --via selects \
-any supported provider. If the daemon is down the install still \
-works — the package is offered for adoption when it returns. App \
-Store apps have no install verb here: install them in the App Store \
-and wukong offers them for adoption."
+syncs like every dotfile. Homebrew by default, and brew settles \
+whether a bare name is a formula or a cask — the manifest records \
+what actually landed, so `wukong install ghostty` remembers a cask. \
+--via selects any other supported provider. If the daemon is down the \
+install still works — the package is offered for adoption when it \
+returns. App Store apps have no install verb here: install them in \
+the App Store and wukong offers them for adoption."
     )]
     #[command(after_long_help = "EXAMPLES:\n  \
 wukong install jq                             a brew formula\n  \
@@ -110,7 +112,7 @@ wukong install --no-track foo                 install without remembering")]
         /// Package name, exactly as the provider knows it
         #[arg(value_name = "PACKAGE")]
         name: String,
-        /// Which provider installs it (default: brew formula)
+        /// Which provider installs it (default: brew, kind auto-detected)
         #[arg(long, value_enum, conflicts_with = "cask")]
         via: Option<pkg_cli::ViaArg>,
         /// Shorthand for --via cask
@@ -135,7 +137,7 @@ say so and leave the file to you."
         /// Package name, exactly as the provider knows it
         #[arg(value_name = "PACKAGE")]
         name: String,
-        /// Which provider uninstalls it (default: brew formula)
+        /// Which provider uninstalls it (default: brew, kind auto-detected)
         #[arg(long, value_enum, conflicts_with = "cask")]
         via: Option<pkg_cli::ViaArg>,
         /// Shorthand for --via cask
@@ -861,27 +863,25 @@ impl From<ResolutionArg> for Resolution {
 
 /// A `provider:name` spelled inline — the same spelling the inbox and
 /// event log use — beats the flags: `wukong install npm:typescript`.
+/// The package name and the provider the user NAMED — `None` when
+/// they only typed a name, which leaves the kind for brew to settle.
 fn name_and_provider(
     name: &str,
     via: Option<pkg_cli::ViaArg>,
     cask: bool,
-) -> (String, wukong_core::pkg::Provider) {
+) -> (String, Option<wukong_core::pkg::Provider>) {
     if via.is_none()
         && !cask
         && let Some((provider, bare)) = wukong_core::pkg::parse_subject(name)
     {
-        return (bare.to_string(), provider);
+        return (bare.to_string(), Some(provider));
     }
-    (name.to_string(), resolve_via(via, cask))
-}
-
-/// `--via`/`--cask` to a provider: cask sugar wins over the default.
-fn resolve_via(via: Option<pkg_cli::ViaArg>, cask: bool) -> wukong_core::pkg::Provider {
-    if cask {
-        wukong_core::pkg::Provider::Cask
+    let named = if cask {
+        Some(wukong_core::pkg::Provider::Cask)
     } else {
-        via.map_or(wukong_core::pkg::Provider::Formula, Into::into)
-    }
+        via.map(Into::into)
+    };
+    (name.to_string(), named)
 }
 
 /// seal-key runs CLI-side: the identity store and the store repo are

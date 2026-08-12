@@ -152,6 +152,39 @@ impl Provider {
     }
 }
 
+/// What Homebrew will actually install for a typed name, read out of
+/// `brew info --json=v2 <name>`.
+///
+/// Homebrew answers to more than a package's real identity: a cask
+/// token typed without `--cask` (`brew install ghostty`), a formula
+/// alias (`delta` pours `git-delta`), an old name for either. The
+/// detectors, by contrast, only ever see what landed on disk. Recording
+/// the typed name leaves a manifest entry no detector can match — it
+/// reads as permanently missing, gets offered for adoption under its
+/// true identity, and gets offered for removal under its false one.
+///
+/// `want` narrows the search to one kind; `None` mirrors brew's own
+/// precedence, where a name that is both a formula and a cask installs
+/// the formula. Names are taken as the detectors see them: a formula's
+/// Cellar directory (`name`) and a cask's Caskroom directory (`token`),
+/// never the tap-qualified spelling.
+#[must_use]
+pub fn brew_identity(json: &str, want: Option<Provider>) -> Option<(Provider, String)> {
+    fn first(v: &serde_json::Value, list: &str, key: &str) -> Option<String> {
+        let name = v.get(list)?.as_array()?.first()?.get(key)?.as_str()?;
+        (!name.is_empty()).then(|| name.to_string())
+    }
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let formula = || first(&v, "formulae", "name").map(|n| (Provider::Formula, n));
+    let cask = || first(&v, "casks", "token").map(|n| (Provider::Cask, n));
+    match want {
+        Some(Provider::Formula) => formula(),
+        Some(Provider::Cask) => cask(),
+        Some(_) => None,
+        None => formula().or_else(cask),
+    }
+}
+
 /// `provider:name` — the inbox subject and event-log spelling.
 #[must_use]
 pub fn subject(provider: Provider, name: &str) -> String {
@@ -715,10 +748,19 @@ fn push_root(
 }
 
 /// Ask a tool for its global root — startup only, and only when the
-/// tool exists on PATH. Hard 10s wall clock: a wedged package manager
-/// (a broken shim, a node runtime waiting on something) costs its
-/// provider, NEVER the daemon's startup.
+/// tool exists on PATH.
 fn global_root(binary: &str, args: &[&str]) -> Option<PathBuf> {
+    let out = bounded_output(binary, args, 10)?;
+    let path = PathBuf::from(out.trim());
+    path.is_dir().then_some(path)
+}
+
+/// Run a tool for its stdout under a hard wall clock. A wedged child
+/// (a broken shim, a runtime waiting on something) costs its caller
+/// one feature, NEVER the process it runs in. Output is piped, so
+/// this is for tools that answer in kilobytes, not streams.
+#[must_use]
+pub fn bounded_output(binary: &str, args: &[&str], secs: u64) -> Option<String> {
     use std::io::Read as _;
     let mut child = std::process::Command::new(binary)
         .args(args)
@@ -727,7 +769,7 @@ fn global_root(binary: &str, args: &[&str]) -> Option<PathBuf> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -736,8 +778,7 @@ fn global_root(binary: &str, args: &[&str]) -> Option<PathBuf> {
                 }
                 let mut out = String::new();
                 child.stdout.take()?.read_to_string(&mut out).ok()?;
-                let path = PathBuf::from(out.trim());
-                return path.is_dir().then_some(path);
+                return Some(out);
             }
             Ok(None) if std::time::Instant::now() >= deadline => {
                 let _ = child.kill();
@@ -1343,5 +1384,63 @@ mod detector_tests {
             .find(|s| s.provider == Provider::Formula)
             .unwrap();
         assert!(!formula.active, "override at a nonexistent dir disables");
+    }
+
+    /// Shapes as `brew info --json=v2` returns them: a cask token typed
+    /// bare, a formula alias, and a name both kinds answer to.
+    const CASK_ONLY: &str = r#"{"formulae":[],"casks":[{"token":"ghostty","name":["Ghostty"]}]}"#;
+    const FORMULA_ALIAS: &str =
+        r#"{"formulae":[{"name":"git-delta","full_name":"git-delta"}],"casks":[]}"#;
+    const BOTH: &str = r#"{"formulae":[{"name":"docker","full_name":"docker"}],
+        "casks":[{"token":"docker","name":["Docker Desktop"]}]}"#;
+
+    #[test]
+    fn brew_identity_reads_the_kind_and_name_that_land_on_disk() {
+        // `wukong install ghostty` must record the CASK it pours, not
+        // the formula the user's typing implied: a formula entry for a
+        // cask can never match a detector and reads as missing forever.
+        assert_eq!(
+            brew_identity(CASK_ONLY, None),
+            Some((Provider::Cask, "ghostty".to_string()))
+        );
+        // An alias resolves to the poured name — `delta` is `git-delta`.
+        assert_eq!(
+            brew_identity(FORMULA_ALIAS, None),
+            Some((Provider::Formula, "git-delta".to_string()))
+        );
+    }
+
+    #[test]
+    fn brew_identity_follows_brews_own_precedence_and_the_named_kind() {
+        // Unqualified, brew installs the formula.
+        assert_eq!(
+            brew_identity(BOTH, None),
+            Some((Provider::Formula, "docker".to_string()))
+        );
+        // A named kind is never overruled — `--cask docker` is a cask.
+        assert_eq!(
+            brew_identity(BOTH, Some(Provider::Cask)),
+            Some((Provider::Cask, "docker".to_string()))
+        );
+        // …and a named kind brew has nothing for resolves to nothing,
+        // leaving the typed identity to the install's own error.
+        assert_eq!(brew_identity(CASK_ONLY, Some(Provider::Formula)), None);
+        assert_eq!(brew_identity(FORMULA_ALIAS, Some(Provider::Cask)), None);
+        assert_eq!(brew_identity(BOTH, Some(Provider::Npm)), None);
+    }
+
+    #[test]
+    fn brew_identity_survives_everything_brew_might_hand_back() {
+        for junk in [
+            "",
+            "not json",
+            "{}",
+            r#"{"formulae":[],"casks":[]}"#,
+            r#"{"formulae":[{}],"casks":[{}]}"#,
+            r#"{"formulae":[{"name":""}],"casks":[]}"#,
+            r#"{"formulae":"nope","casks":7}"#,
+        ] {
+            assert_eq!(brew_identity(junk, None), None, "junk accepted: {junk}");
+        }
     }
 }
