@@ -968,6 +968,39 @@ pub fn read_current(
     out
 }
 
+/// How long `defaults export` gets to answer. It reads one domain
+/// through cfprefsd; it is instant or it is broken.
+const DEFAULTS_TIMEOUT_SECS: u64 = 10;
+
+/// Read one value back through the same door a write went in.
+///
+/// `defaults write` exits 0 when cfprefsd ACCEPTS a value, not when the
+/// value has settled — and a `killall` racing that handover can lose it
+/// outright, which is how a synced Dock layout arrives empty while the
+/// apply reports success. Confirming the value is the only way an
+/// "applied" count means anything.
+///
+/// `target` mirrors whatever the write addressed: a domain on a real
+/// machine, a plist path in a sandboxed run. Reading a real domain
+/// through the plist FILE would reintroduce the same skew, since the
+/// file is written on cfprefsd's schedule, not ours.
+#[must_use]
+pub fn read_back(target: &str, key: &str) -> Option<Value> {
+    let dict = if Path::new(target).extension().is_some_and(|e| e == "plist") {
+        plist::Value::from_file(target).ok()?
+    } else {
+        let xml = crate::proc::bounded_output(
+            "defaults",
+            &["export", target, "-"],
+            DEFAULTS_TIMEOUT_SECS,
+        )?;
+        plist::Value::from_reader_xml(std::io::Cursor::new(xml)).ok()?
+    };
+    dict.as_dictionary()?
+        .get(key)
+        .and_then(Value::from_plist_any)
+}
+
 /// Domain name for a plist file, inverting `plist_path`'s spelling.
 fn domain_of(file_name: &str) -> Option<&str> {
     if file_name == ".GlobalPreferences.plist" {
@@ -1245,5 +1278,39 @@ mod tests {
             current[&("com.apple.dock".to_string(), "autohide".to_string())]
                 .matches(&Value::Bool(true))
         );
+    }
+
+    /// The confirmation step `apply` leans on: a written value has to
+    /// be readable back as the same value, complex ones included.
+    #[test]
+    fn a_written_value_reads_back_as_itself() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file = plist_path(tmp.path(), "com.apple.dock");
+        let mut dict = plist::Dictionary::new();
+        dict.insert("autohide".to_string(), plist::Value::Boolean(true));
+        dict.insert(
+            "persistent-apps".to_string(),
+            plist::Value::Array(vec![
+                plist::Value::String("one".to_string()),
+                plist::Value::String("two".to_string()),
+            ]),
+        );
+        plist::Value::Dictionary(dict).to_file_xml(&file).unwrap();
+        let target = file.to_string_lossy().into_owned();
+
+        let scalar = read_back(&target, "autohide").expect("scalar reads back");
+        assert!(scalar.matches(&Value::Bool(true)));
+        let complex = read_back(&target, "persistent-apps").expect("array reads back");
+        assert!(
+            complex.matches(&complex),
+            "a complex value must compare equal to itself"
+        );
+        assert!(
+            !complex.matches(&Value::Bool(true)),
+            "and must not match something it is not"
+        );
+        // A key that is not there is not a confirmation.
+        assert!(read_back(&target, "never-written").is_none());
+        assert!(read_back("/no/such/file.plist", "autohide").is_none());
     }
 }

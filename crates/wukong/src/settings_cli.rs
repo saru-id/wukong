@@ -81,8 +81,21 @@ pub fn diff() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Write a plan of settings via `defaults`, then restart what needs
-/// it. Shared by `settings sync` and the all-in `wukong sync`.
+/// Write one value through `defaults` and read it back to see whether
+/// it stuck. The read goes through the same door as the write, so a
+/// value still in flight inside cfprefsd reads as not-yet-there rather
+/// than as success.
+fn write_and_confirm(target: &str, key: &str, value: &wukong_core::settings::Value) -> bool {
+    let wrote = std::process::Command::new("defaults")
+        .args(["write", target, key])
+        .args(value.defaults_args())
+        .status()
+        .is_ok_and(|s| s.success());
+    wrote && wukong_core::settings::read_back(target, key).is_some_and(|got| got.matches(value))
+}
+
+/// Write a plan of settings via `defaults`, then restart what needs it.
+/// Shared by `settings sync` and the all-in `wukong sync`.
 pub(crate) fn apply(plan: &[&SettingEntry], file_dir: Option<&str>) {
     let mut restarts: BTreeSet<String> = BTreeSet::new();
     let mut applied = 0;
@@ -96,18 +109,26 @@ pub(crate) fn apply(plan: &[&SettingEntry], file_dir: Option<&str>) {
                 .into_owned(),
             None => e.domain.clone(),
         };
-        let ok = std::process::Command::new("defaults")
-            .args(["write", &target, &e.key])
-            .args(value.defaults_args())
-            .status()
-            .is_ok_and(|s| s.success());
-        if ok {
+        // Written, then confirmed. `defaults write` exits 0 when
+        // cfprefsd accepts the value, not when it has settled, and the
+        // restart below can race that handover and lose it — a Dock
+        // layout that arrives empty under an "applied 1 setting(s)".
+        // One retry covers the transient case; anything past that is
+        // reported instead of counted.
+        let mut landed = write_and_confirm(&target, &e.key, value);
+        if !landed {
+            landed = write_and_confirm(&target, &e.key, value);
+        }
+        if landed {
             applied += 1;
             if let Some(restart) = &e.restart {
                 restarts.insert(restart.clone());
             }
         } else {
-            eprintln!("failed: {} {}", e.domain, e.key);
+            eprintln!(
+                "failed: {} {} did not take — the value was written but reads back wrong",
+                e.domain, e.key
+            );
         }
     }
     println!("applied {applied} setting(s)");

@@ -109,6 +109,20 @@ check "a float round-trips through defaults" \
 check "the plist wukong would READ has the value defaults wrote" \
   "plutil -extract DrillFloat raw '$REAL_HOME/Library/Preferences/$DOMAIN.plist' | grep -q '0.35'"
 
+echo "=== a written value has to read back, or 'applied' means nothing"
+# The apply path confirms every write by reading it back through the
+# same door. On a real machine that door is cfprefsd, not the plist
+# file — the file is written on cfprefsd's schedule, not ours — and a
+# complex value racing a `killall` is exactly how a synced Dock layout
+# arrives empty under an "applied 1 setting(s)".
+defaults write "$DOMAIN" DrillLayout '<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><array><string>one</string><string>two</string></array></plist>'
+check "a complex value survives defaults write" \
+  "[ \"$(defaults read "$DOMAIN" DrillLayout 2>/dev/null | grep -c one)\" = 1 ]"
+check "and reads back through the export door the apply uses" \
+  "defaults export '$DOMAIN' - | plutil -extract DrillLayout.0 raw - | grep -q one"
+
 echo "=== ByHost is a real place, and wukong does not look there"
 BYHOST="$REAL_HOME/Library/Preferences/ByHost"
 if [ -d "$BYHOST" ]; then
