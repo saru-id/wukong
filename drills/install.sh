@@ -67,6 +67,13 @@ check "config written by first use" "[ -f \"$XDG_CONFIG_HOME/wukong/config.toml\
 check "the command itself still worked" "grep -q 'tracking' \"$ROOT/first.log\""
 check "status now answers" "\"$W\" status | grep -q 'local-only'"
 
+# `wukong <verb> | grep -q …` and `| head` are how people read this
+# tool. A reader that exits first must cost nothing but the output.
+"$W" doctor 2> "$ROOT/pipe.err" | true
+check "a reader that walks away is not a crash" "[ ! -s \"$ROOT/pipe.err\" ]"
+"$W" settings list 2> "$ROOT/pipe2.err" | true
+check "…on any verb, not just the one that found it" "[ ! -s \"$ROOT/pipe2.err\" ]"
+
 echo "=== the remote attaches late, safely"
 git init -q --bare -b main "$ROOT/late-remote.git"
 WUKONG_NO_AGENT=1 "$W" remote "$ROOT/late-remote.git" > "$ROOT/remote.log" 2>&1

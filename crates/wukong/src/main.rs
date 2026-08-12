@@ -1132,7 +1132,31 @@ fn preflight(command: Option<&Command>) -> anyhow::Result<()> {
     }
 }
 
+/// A reader that walks away is not a crash. Rust ignores SIGPIPE, so
+/// the routine EPIPE from `wukong doctor | grep -q …`, `wukong inbox |
+/// head`, or any pipeline whose reader exits first surfaces as a panic
+/// and a backtrace note across the user's terminal. Translate that one
+/// panic back into what a shell expects when a pipe closes: silence,
+/// and the conventional 128 + SIGPIPE status. Every other panic keeps
+/// the standard hook, message and all.
+fn quiet_broken_pipe() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        if message.starts_with("failed printing to") && message.contains("Broken pipe") {
+            std::process::exit(141);
+        }
+        previous(info);
+    }));
+}
+
 fn main() -> anyhow::Result<()> {
+    quiet_broken_pipe();
     let cli = Cli::parse();
     preflight(cli.command.as_ref())?;
     match cli.command {
