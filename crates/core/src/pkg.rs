@@ -773,45 +773,9 @@ fn push_root(
 /// Ask a tool for its global root — startup only, and only when the
 /// tool exists on PATH.
 fn global_root(binary: &str, args: &[&str]) -> Option<PathBuf> {
-    let out = bounded_output(binary, args, 10)?;
+    let out = crate::proc::bounded_output(binary, args, 10)?;
     let path = PathBuf::from(out.trim());
     path.is_dir().then_some(path)
-}
-
-/// Run a tool for its stdout under a hard wall clock. A wedged child
-/// (a broken shim, a runtime waiting on something) costs its caller
-/// one feature, NEVER the process it runs in. Output is piped, so
-/// this is for tools that answer in kilobytes, not streams.
-#[must_use]
-pub fn bounded_output(binary: &str, args: &[&str], secs: u64) -> Option<String> {
-    use std::io::Read as _;
-    let mut child = std::process::Command::new(binary)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return None;
-                }
-                let mut out = String::new();
-                child.stdout.take()?.read_to_string(&mut out).ok()?;
-                return Some(out);
-            }
-            Ok(None) if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-            Err(_) => return None,
-        }
-    }
 }
 
 fn newest_dir(parent: &Path) -> Option<PathBuf> {

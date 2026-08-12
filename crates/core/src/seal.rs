@@ -153,33 +153,62 @@ pub enum IdentityStore {
 const KEYCHAIN_SERVICE: &str = "id.saru.wukong.seal";
 const KEYCHAIN_ACCOUNT: &str = "wukong";
 
+/// `errSecItemNotFound`, as `security(1)` exits with it. The ONE code
+/// that means "there is no such item"; every other failure means the
+/// keychain would not answer, which is a different thing entirely.
+const ERR_SEC_ITEM_NOT_FOUND: i32 = 44;
+
+/// The keychain is asked from the daemon's event loop. An unlock
+/// prompt nobody is present to click, or a securityd that stopped
+/// answering, must cost the seal probe — not the governor.
+const KEYCHAIN_TIMEOUT_SECS: u64 = 10;
+
 impl IdentityStore {
     #[must_use]
     pub fn from_config(identity_file: Option<&Path>) -> Self {
         identity_file.map_or(Self::Keychain, |p| Self::File(p.to_path_buf()))
     }
 
-    /// Load the identity, `Ok(None)` when none exists yet.
+    /// Load the identity. `Ok(None)` means the store answered and there
+    /// is genuinely nothing there — never "the store would not talk to
+    /// us", which is an error and must stay one: callers treat `None`
+    /// as permission to generate a fresh key pair, and generating over
+    /// a key that was merely unreachable orphans every sealed blob in
+    /// the store, permanently and silently.
     pub fn load(&self) -> Result<Option<String>, SealError> {
         match self {
             Self::Keychain => {
-                let out = std::process::Command::new("security")
-                    .args([
+                let out = crate::proc::bounded(
+                    "security",
+                    &[
                         "find-generic-password",
                         "-a",
                         KEYCHAIN_ACCOUNT,
                         "-s",
                         KEYCHAIN_SERVICE,
                         "-w",
-                    ])
-                    .output()?;
+                    ],
+                    KEYCHAIN_TIMEOUT_SECS,
+                )
+                .ok_or_else(|| {
+                    SealError::Crypto(
+                        "the keychain did not answer in time — is securityd wedged?".to_string(),
+                    )
+                })?;
                 if out.status.success() {
-                    Ok(Some(
+                    return Ok(Some(
                         String::from_utf8_lossy(&out.stdout).trim().to_string(),
-                    ))
-                } else {
-                    Ok(None)
+                    ));
                 }
+                if out.status.code() == Some(ERR_SEC_ITEM_NOT_FOUND) {
+                    return Ok(None);
+                }
+                // A locked keychain lands here (152), as does a denied
+                // prompt and anything else securityd objects to.
+                Err(SealError::Crypto(format!(
+                    "the keychain refused to hand over the seal identity: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )))
             }
             Self::File(path) => match std::fs::read_to_string(path) {
                 Ok(text) => Ok(Some(text.trim().to_string())),
@@ -191,11 +220,24 @@ impl IdentityStore {
 
     /// Persist the identity (overwriting any previous one — import is
     /// deliberate).
+    ///
+    /// A write to a LOCKED keychain blocks forever — measured: ten
+    /// minutes and still waiting on an unlock prompt with nobody
+    /// present to answer it. The read path fails fast (exit 152); this
+    /// one just stops. The wall clock is what keeps that from being a
+    /// wedged governor, and it also bounds the second problem: the
+    /// identity travels in `security`'s argv, readable in `ps` for as
+    /// long as the call runs. `security(1)` offers no stdin path for
+    /// it — `-w` with no value eats the next positional, and its
+    /// interactive prompt wants a tty no daemon has — so the honest
+    /// statement is that the key is exposed for at most the timeout,
+    /// not that it isn't exposed.
     pub fn save(&self, identity: &str) -> Result<(), SealError> {
         match self {
             Self::Keychain => {
-                let out = std::process::Command::new("security")
-                    .args([
+                let out = crate::proc::bounded(
+                    "security",
+                    &[
                         "add-generic-password",
                         "-a",
                         KEYCHAIN_ACCOUNT,
@@ -204,8 +246,14 @@ impl IdentityStore {
                         "-U",
                         "-w",
                         identity,
-                    ])
-                    .output()?;
+                    ],
+                    KEYCHAIN_TIMEOUT_SECS,
+                )
+                .ok_or_else(|| {
+                    SealError::Crypto(
+                        "the keychain did not answer in time — is securityd wedged?".to_string(),
+                    )
+                })?;
                 if out.status.success() {
                     Ok(())
                 } else {
@@ -287,5 +335,28 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// "There is no key" and "I could not read the key" must never be
+    /// the same answer: the first is permission to make a new one, and
+    /// making a new one over the second orphans every sealed blob in
+    /// the store. The keychain says this with exit 44 versus anything
+    /// else; a file store says it with `NotFound` versus anything else.
+    #[test]
+    fn an_unreadable_identity_store_is_an_error_not_an_empty_one() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(
+            IdentityStore::File(tmp.path().join("never-written"))
+                .load()
+                .unwrap()
+                .is_none(),
+            "an absent identity is genuinely absent"
+        );
+        let unreadable = tmp.path().join("age.key");
+        std::fs::create_dir_all(&unreadable).unwrap();
+        assert!(
+            IdentityStore::File(unreadable).load().is_err(),
+            "an unreadable identity must not read as absent"
+        );
     }
 }

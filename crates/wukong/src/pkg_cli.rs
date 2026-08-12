@@ -76,7 +76,7 @@ fn brew_resolve(name: &str, explicit: Option<Provider>) -> (Provider, String) {
     if !matches!(fallback, Provider::Formula | Provider::Cask) {
         return (fallback, name.to_string());
     }
-    let Some(json) = wukong_core::pkg::bounded_output(
+    let Some(json) = wukong_core::proc::bounded_output(
         "brew",
         &["info", "--json=v2", name],
         BREW_INFO_TIMEOUT_SECS,

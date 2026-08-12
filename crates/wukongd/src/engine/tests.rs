@@ -1831,3 +1831,34 @@ fn offers_an_older_wukong_made_are_withdrawn_not_inherited() {
     // Withdrawing is idempotent — a restart must not re-count them.
     assert_eq!(rig.engine.retire_stale_offers(), 0);
 }
+
+/// The consequence the identity store's error/empty distinction exists
+/// to prevent: a fresh key pair written over one that was only
+/// unreachable makes every sealed blob in the store undecryptable, for
+/// good, without a word.
+#[test]
+fn an_unreachable_identity_store_never_becomes_a_new_key() {
+    let mut rig = rig();
+    let recipient_file = rig
+        .engine
+        .store
+        .dir()
+        .join(wukong_core::seal::RECIPIENT_REL);
+
+    // Unreachable — a path that exists but cannot be read as a key.
+    let blocked = rig.home.join("blocked-identity");
+    std::fs::create_dir_all(&blocked).unwrap();
+    rig.engine.config.seal.identity_file = Some(blocked);
+    assert!(
+        rig.engine.ensure_recipient().is_none(),
+        "an unreadable identity store must not mint a key"
+    );
+    assert!(!recipient_file.exists(), "and must not publish a recipient");
+
+    // Genuinely absent — the one case where minting is right.
+    let fresh = rig.home.join("keys/age.key");
+    rig.engine.config.seal.identity_file = Some(fresh.clone());
+    assert!(rig.engine.ensure_recipient().is_some());
+    assert!(fresh.is_file());
+    assert!(recipient_file.is_file());
+}

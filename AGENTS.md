@@ -224,12 +224,27 @@ application that may sit nearby on disk as `../wukong-backup`).
   flow pick it up — never a git rewrite, and a reverted-to secret
   still quarantines.
 
-- **Every fork gets a deadline; every test forks nothing real.** Any
-  child process the daemon spawns (push 120s, root probes 10s) has a
-  hard wall clock — a wedged shim costs its feature, never the
-  daemon. And no unit test may fork a real package manager: a hanging
-  `pnpm root -g` once froze the suite for two hours. Override npm AND
-  pnpm to absent paths in every detect_roots test.
+- **Every fork gets a deadline; every test forks nothing real.** Every
+  child process goes through `proc::bounded` (push 120s, root probes
+  and the keychain 10s, `brew info` 15s) — a wedged shim costs its
+  feature, never the daemon. This is not theoretical: `security
+  add-generic-password` against a LOCKED login keychain blocks
+  indefinitely on an unlock prompt nobody is present to click. And no
+  unit test may fork a real package manager: a hanging `pnpm root -g`
+  once froze the suite for two hours. Override npm AND pnpm to absent
+  paths in every detect_roots test.
+- **"No key" and "could not ask" are different answers.** An identity
+  store returns `Ok(None)` ONLY when it positively answered that
+  nothing is there — the keychain's exit 44, a file's NotFound.
+  Everything else is `Err`. Callers read `None` as permission to mint
+  a fresh key pair, and minting over a key that was merely unreachable
+  orphans every sealed blob in the store, silently and forever.
+- **A sandbox cannot reach the Keychain.** `security` resolves the
+  login keychain through `$HOME`, so a drill with a fake HOME never
+  touches the real one — which is how the Keychain path shipped for
+  twenty releases unrun. `drills/realmachine.sh` (opt-in, not in `make
+  drill`, not in CI) covers what only a live login session can prove,
+  and spells out by hand what it still cannot automate.
 
 - **The trust model: one domain, made visible.** The remote and every
   machine holding the store are a single trust domain — wukong makes

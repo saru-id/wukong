@@ -12,6 +12,7 @@ pub mod gobuild;
 pub mod ipc;
 pub mod paths;
 pub mod pkg;
+pub mod proc;
 pub mod seal;
 pub mod settings;
 pub mod store;
