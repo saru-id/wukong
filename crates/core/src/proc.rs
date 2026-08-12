@@ -8,8 +8,11 @@
 //! child here, and it has a wall clock. A wedged child costs its caller
 //! one feature, never the process it runs in.
 //!
-//! Output is piped and read after exit, which suits tools that answer
-//! in kilobytes. Anything that streams belongs somewhere else.
+//! Both output streams are piped and drained only AFTER the child
+//! exits, so a child that writes more than a pipe buffer holds (~64KB)
+//! blocks until the deadline kills it. That suits tools that answer in
+//! kilobytes and are asked to be quiet; anything that streams belongs
+//! somewhere else.
 
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};

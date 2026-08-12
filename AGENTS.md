@@ -224,15 +224,20 @@ application that may sit nearby on disk as `../wukong-backup`).
   flow pick it up — never a git rewrite, and a reverted-to secret
   still quarantines.
 
-- **Every fork gets a deadline; every test forks nothing real.** Every
-  child process goes through `proc::bounded` (push 120s, root probes
-  and the keychain 10s, `brew info` 15s) — a wedged shim costs its
+- **Every fork gets a deadline; every test forks nothing real.** New
+  children go through `proc::bounded` — root probes, the keychain and
+  `mdls` at 10s, `brew info` 15s, the shared fetch 30s, notifications
+  20s. `Store::push` keeps its own 120s loop because it has to tell a
+  timeout apart from a rejection; it is the one exception, and adding
+  a second is a decision, not a shortcut. A wedged shim costs its
   feature, never the daemon. This is not theoretical: `security
   add-generic-password` against a LOCKED login keychain blocks
-  indefinitely on an unlock prompt nobody is present to click. And no
-  unit test may fork a real package manager: a hanging `pnpm root -g`
-  once froze the suite for two hours. Override npm AND pnpm to absent
-  paths in every detect_roots test.
+  indefinitely on an unlock prompt nobody is present to click. Note
+  both pipes are drained only after exit, so a chatty child must be
+  asked to be quiet (`-q`) or it will hit its deadline. And no unit
+  test may fork a real package manager: a hanging `pnpm root -g` once
+  froze the suite for two hours. Override npm AND pnpm to absent paths
+  in every detect_roots test.
 - **"No key" and "could not ask" are different answers.** An identity
   store returns `Ok(None)` ONLY when it positively answered that
   nothing is there — the keychain's exit 44, a file's NotFound.

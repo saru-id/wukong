@@ -1,5 +1,5 @@
 //! The dashboard: bare `wukong` lands here, inbox first. Five tabs
-//! (Inbox, Files, Activity, Packages), number keys or h/l to move,
+//! (Inbox, Files, Activity, Packages, Settings), number keys or h/l to move,
 //! j/k to walk a list, and on the inbox a/n/s to approve, never, or
 //! skip the selected item. It polls the daemon on a short cadence so
 //! a change committed while you watch shows up on its own.
@@ -12,7 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
-use std::io::stdout;
+use std::io::{stdin, stdout};
 use std::time::{Duration, Instant};
 use wukong_core::events::{InboxKind, Resolution};
 use wukong_core::ipc::{PkgEntry, Request, Response, SettingEntry, StatusInfo, TrackedFile};
@@ -69,6 +69,16 @@ struct App {
 }
 
 pub fn run() -> anyhow::Result<()> {
+    // Bare `wukong` is the dashboard, and a dashboard needs somewhere
+    // to draw. Without a terminal — a cron line, a script, a pipe —
+    // crossterm fails at raw mode with "Device not configured", which
+    // tells the user nothing about what to do instead.
+    if !std::io::IsTerminal::is_terminal(&stdout()) || !std::io::IsTerminal::is_terminal(&stdin()) {
+        anyhow::bail!(
+            "the dashboard needs a terminal — for a script, try `wukong status`, \
+             `wukong inbox`, or any verb with --json"
+        );
+    }
     if !client::connected() {
         println!("wukongd is not running.");
         println!("Start it with `wukong daemon start`, or set up with `wukong init`.");
@@ -537,13 +547,19 @@ impl App {
 
     fn render_status(&self, f: &mut Frame, area: Rect) {
         let s = self.data.status.as_ref();
-        let left = match s {
-            Some(s) => format!(
+        // A dashboard showing the last thing it heard, with no sign the
+        // daemon stopped answering, is worse than one showing nothing.
+        let left = match (self.connected, s) {
+            (false, _) => " ✗ wukongd is not answering — `wukong daemon start`".to_string(),
+            (true, Some(s)) => format!(
                 " {} · {} tracked · {} inbox · {} unpushed",
                 s.machine, s.tracked, s.inbox, s.unpushed
             ),
-            None => " connecting…".to_string(),
+            (true, None) => " connecting…".to_string(),
         };
+        // Every hint names keys that exist. `i` is not one of them, and
+        // the words are the vocabulary `resolve` actually speaks:
+        // approve / never / skip, with redact and seal on quarantines.
         let hint = match self.tab {
             Tab::Inbox => match self
                 .data
@@ -551,11 +567,17 @@ impl App {
                 .get(self.selected)
                 .and_then(wukong_core::InboxItem::kind)
             {
-                Some(InboxKind::Package) => "a adopt · i never ask again · q quit",
-                Some(InboxKind::Setting) => "a record · i never ask again · q quit",
-                Some(InboxKind::PackageGone) => "a drop from manifest · i keep · q quit",
-                Some(InboxKind::Sentinel) => "a track · i ignore · x exclude dir · q quit",
-                _ => "a approve · n never · s skip · r redact · e seal · q quit",
+                Some(InboxKind::Package) => "a adopt · n never ask again · s not now · q quit",
+                Some(InboxKind::Setting) => "a record · n never ask again · s not now · q quit",
+                Some(InboxKind::PackageGone) => "a drop from manifest · s keep it · q quit",
+                Some(InboxKind::Sentinel) => {
+                    "a track · n never (excludes it) · s not now · x exclude dir · q quit"
+                }
+                Some(InboxKind::Quarantine) => "a approve · r redact · e seal · s hold · q quit",
+                Some(InboxKind::Health | InboxKind::SharedUpdate) => {
+                    "a approve · s dismiss · q quit"
+                }
+                None => "j/k move · h/l tabs · R refresh · q quit",
             },
             _ => "j/k move · h/l tabs · R refresh · q quit",
         };

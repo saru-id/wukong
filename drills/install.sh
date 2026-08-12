@@ -74,6 +74,12 @@ check "a reader that walks away is not a crash" "[ ! -s \"$ROOT/pipe.err\" ]"
 "$W" settings list 2> "$ROOT/pipe2.err" | true
 check "…on any verb, not just the one that found it" "[ ! -s \"$ROOT/pipe2.err\" ]"
 
+# The dashboard is the default command, so the no-terminal case is
+# every cron line and every script that types `wukong` by habit.
+"$W" < /dev/null > "$ROOT/tui.out" 2>&1
+check "bare wukong without a terminal explains itself" \
+  "grep -q 'needs a terminal' \"$ROOT/tui.out\" && ! grep -q 'Device not configured' \"$ROOT/tui.out\""
+
 echo "=== the remote attaches late, safely"
 git init -q --bare -b main "$ROOT/late-remote.git"
 WUKONG_NO_AGENT=1 "$W" remote "$ROOT/late-remote.git" > "$ROOT/remote.log" 2>&1
