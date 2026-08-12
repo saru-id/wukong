@@ -1927,3 +1927,44 @@ fn untracking_closes_the_held_change_it_leaves_behind() {
         "held change outlived the tracking: {open:?}"
     );
 }
+
+/// The settings twin of the vanished-file offer: a question that
+/// outlives the change that raised it, still carrying the answer.
+#[test]
+fn a_setting_reverted_to_its_default_withdraws_its_offer() {
+    let (mut rig, prefs) = settings_rig();
+    // Baseline first, then a real change the reconcile offers to record.
+    rig.engine.reconcile_settings();
+    write_pref(&prefs, "com.apple.dock", "launchanim", false.into());
+    assert_eq!(rig.engine.reconcile_settings(), 1);
+    let open = rig.engine.db.inbox_open().unwrap();
+    let offer = open
+        .iter()
+        .find(|i| i.subject == "com.apple.dock launchanim")
+        .expect("offered");
+    assert!(
+        offer.body.contains("approve — record"),
+        "the offer carries a value to record: {}",
+        offer.body
+    );
+
+    // The user puts it back: the key returns to the OS default, which
+    // on macOS means it stops existing.
+    let path = wukong_core::settings::plist_path(&prefs, "com.apple.dock");
+    let Ok(plist::Value::Dictionary(mut dict)) = plist::Value::from_file(&path) else {
+        panic!("prefs readable");
+    };
+    dict.remove("launchanim");
+    plist::Value::Dictionary(dict)
+        .to_file_binary(&path)
+        .unwrap();
+
+    rig.engine.reconcile_settings();
+    let open = rig.engine.db.inbox_open().unwrap();
+    assert!(
+        !open
+            .iter()
+            .any(|i| i.subject == "com.apple.dock launchanim"),
+        "an offer to record a value the machine no longer has: {open:?}"
+    );
+}

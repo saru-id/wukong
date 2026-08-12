@@ -92,10 +92,21 @@ impl Engine {
             new_items += self.offer_setting(domain, key, live, acknowledged.as_ref());
         }
         // Keys that vanished (reverted to OS default): acknowledge
-        // silently — absence is not a value worth an offer.
+        // silently — absence is not a value worth an offer. Which is
+        // exactly why any offer ALREADY open for the key has to go too.
+        // It was written against a value the machine no longer has, and
+        // it still says "approve — record <that value>": approving it
+        // records a desired value the user has just undone, and the
+        // next `settings sync` writes it back. A question outliving the
+        // change that raised it is worse than never asking.
         for (id, _) in state {
             if id.0 != BASELINE && !current.contains_key(&id) {
                 soft(self.db.settings_state_remove(&id.0, &id.1));
+                soft(self.db.inbox_resolve_open(
+                    InboxKind::Setting,
+                    &format!("{} {}", id.0, id.1),
+                    Resolution::Skip,
+                ));
             }
         }
         new_items
