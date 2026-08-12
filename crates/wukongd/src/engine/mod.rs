@@ -1245,6 +1245,13 @@ impl Engine {
                 force,
                 dry_run,
             } => {
+                // "Make this machine match the store" has to mean the
+                // store as it is now, not as this machine last saw it.
+                // Without this, the shared lane is only ever refreshed
+                // on the six-hourly heartbeat, so a file another
+                // machine shared an hour ago is invisible to the very
+                // command whose job is to bring it in.
+                self.fold_shared_arrivals();
                 if dry_run {
                     self.restore_plan()
                 } else {

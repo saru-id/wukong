@@ -186,8 +186,11 @@ async fn main() -> anyhow::Result<()> {
     engine.retire_stale_offers();
 
     // Catch anything installed or changed while the daemon was down —
-    // those count as new items worth a notification too.
-    let startup_items = engine.reconcile() + engine.reconcile_settings();
+    // those count as new items worth a notification too. The shared
+    // lane is part of "while the daemon was down": another machine may
+    // have pushed, and waiting six hours to look is not governing.
+    let startup_items =
+        engine.reconcile() + engine.reconcile_settings() + engine.fold_shared_arrivals();
     if notify_on && startup_items > 0 {
         notify_user::inbox(startup_items);
     }

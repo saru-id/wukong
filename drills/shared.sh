@@ -124,6 +124,48 @@ check "B's edit lands on the shared branch" "grep -q 'name = b' '$SHARED_B/.gitc
 "$W" push > /dev/null
 check "remote shared carries B's edit" "git -C '$ROOT/remote.git' show shared:.gitconfig | grep -q 'name = b'"
 
+echo "=== a machine already running sees what arrives after it started"
+# The six-hourly rescan is not a sync story. `wukong sync` means "match
+# the store as it is NOW", so the shared lane is refreshed on the spot.
+env_for a
+"$BIN/wukongd" > "$ROOT/a2-daemon.log" 2>&1 &
+APID2=$!
+wait_daemon || echo "  WARN  daemon A slow to answer"
+printf 'set -o vi\n' > "$HOME/.inputrc"
+"$W" track --shared "$HOME/.inputrc" > /dev/null
+sleep 2.5
+"$W" push > /dev/null
+kill $APID2 2>/dev/null; sleep 0.5
+
+env_for b   # B has been up the whole time and never rescanned
+PLAN=$("$W" sync --dry-run)
+check "sync refreshes the shared lane before planning" "echo \"$PLAN\" | grep -q inputrc"
+
+echo "=== a machine that holds only shared files can still push"
+# Its own branch is unborn — a new machine's root is empty by design —
+# and `git push` answers "src refspec does not match any" for it. That
+# must not take the shared lane's commits down with it.
+env_for c
+git clone -q "$ROOT/remote.git" "$XDG_DATA_HOME/wukong/store" 2> /dev/null
+git -C "$XDG_DATA_HOME/wukong/store" config user.name wukong
+git -C "$XDG_DATA_HOME/wukong/store" config user.email wukong@sandbox-c
+git -C "$XDG_DATA_HOME/wukong/store" checkout -q --orphan sandbox-c
+git -C "$XDG_DATA_HOME/wukong/store" rm -rq --cached . 2> /dev/null
+"$BIN/wukongd" > "$ROOT/c-daemon.log" 2>&1 &
+CPID=$!
+wait_daemon || echo "  WARN  daemon C slow to answer"
+check "C's branch really is unborn" \
+  "! git -C '$XDG_DATA_HOME/wukong/store' rev-parse --verify -q HEAD > /dev/null"
+"$W" restore > /dev/null 2>&1
+printf 'set -o emacs\n' > "$HOME/.inputrc"
+sleep 2.5
+OUT=$("$W" push 2>&1)
+check "push succeeds despite the unborn machine branch" "echo \"$OUT\" | grep -q '^pushed$'"
+check "and C's shared edit reached the remote" \
+  "git -C '$ROOT/remote.git' show shared:.inputrc | grep -q emacs"
+kill $CPID 2>/dev/null; sleep 0.5
+env_for b
+
 echo "=== the fleet view"
 "$W" machines > "$ROOT/machines.log"
 check "machines lists both sandboxes and the lane" "grep -q 'sandbox-a' \"$ROOT/machines.log\" && grep -q 'sandbox-b' \"$ROOT/machines.log\" && grep -q 'shared lane' \"$ROOT/machines.log\""

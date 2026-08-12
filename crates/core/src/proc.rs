@@ -20,8 +20,17 @@ use std::time::{Duration, Instant};
 /// did not tell us anything.
 #[must_use]
 pub fn bounded(binary: &str, args: &[&str], secs: u64) -> Option<Output> {
-    let mut child = Command::new(binary)
-        .args(args)
+    let mut command = Command::new(binary);
+    command.args(args);
+    bounded_cmd(command, secs)
+}
+
+/// The same leash on a command the caller built — for children that
+/// need their environment set (git's terminal-prompt and ssh
+/// discipline) before they are allowed to run.
+#[must_use]
+pub fn bounded_cmd(mut command: Command, secs: u64) -> Option<Output> {
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

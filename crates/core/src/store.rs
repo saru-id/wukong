@@ -38,6 +38,11 @@ const SCRATCH_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(3600
 #[allow(clippy::duration_suboptimal_units)] // Duration::from_mins is unstable
 const PUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// Shorter than a push's: a fetch of one small branch either answers
+/// quickly or is not going to, and this one runs while a user waits on
+/// `wukong sync`.
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Distinguishes concurrent diff scratch files; pid alone is not
 /// unique enough (test threads, a future multi-engine world).
 static SCRATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -236,11 +241,9 @@ impl Store {
     /// Returns true when remote commits arrived.
     pub fn refresh_shared(&self) -> Result<Option<(String, String)>, StoreError> {
         let shared = self.shared();
-        if shared
-            .git(&["fetch", "-q", "origin", SHARED_BRANCH])
-            .is_err()
-        {
-            // Remote unreachable or branch not there yet — not news.
+        if !shared.fetch_shared() {
+            // Remote unreachable, too slow, or the branch is not there
+            // yet — none of that is news.
             return Ok(None);
         }
         let behind: usize = shared
@@ -343,6 +346,26 @@ impl Store {
     #[must_use]
     pub fn branch(&self) -> &str {
         &self.branch
+    }
+
+    /// Fetch the shared branch under a wall clock. This is the one
+    /// read that touches the network, it runs on the daemon's event
+    /// loop, and a remote that accepts the connection and then stalls
+    /// must cost this refresh and nothing else. Same ssh discipline as
+    /// push: no prompts, no waiting on an unreachable host.
+    fn fetch_shared(&self) -> bool {
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(&self.dir)
+            .args(["fetch", "-q", "origin", SHARED_BRANCH])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env(
+                "GIT_SSH_COMMAND",
+                "ssh -o BatchMode=yes -o ConnectTimeout=30",
+            );
+        crate::proc::bounded_cmd(command, FETCH_TIMEOUT.as_secs())
+            .is_some_and(|out| out.status.success())
     }
 
     fn git(&self, args: &[&str]) -> Result<String, StoreError> {
@@ -560,6 +583,16 @@ impl Store {
     /// connection and then stalls must not park the push slot forever —
     /// `push_in_flight` only clears when this returns.
     pub fn push(&self) -> Result<(), StoreError> {
+        // A branch with no commits is not a failure to push, it is
+        // nothing to push. A new machine's branch starts as an orphan
+        // root and stays unborn until it governs its first file — and
+        // until then `git push` answers "src refspec does not match
+        // any", which used to abort the whole push and take the SHARED
+        // lane's commits down with it. A machine that only holds
+        // shared files could never push anything at all.
+        if self.git(&["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
+            return Ok(());
+        }
         let mut child = Command::new("git")
             .arg("-C")
             .arg(&self.dir)
