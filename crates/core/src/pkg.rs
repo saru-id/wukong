@@ -494,14 +494,37 @@ impl Roots {
     #[must_use]
     pub fn installed(&mut self) -> Vec<(Provider, Installed)> {
         let mut cache = std::mem::take(&mut self.go_cache);
-        let out = self
+        let mut out: Vec<(Provider, Installed)> = self
             .active
             .iter()
             .filter_map(|root| root.installed(&mut cache))
             .flatten()
             .collect();
         self.go_cache = cache;
+        // A cask that ships an app is ONE installed thing seen by two
+        // detectors — the Caskroom entry and the bundle it dropped in
+        // /Applications. The cask is the governable identity: it has an
+        // install command, and the bundle does not. So the app hides
+        // behind it, or every GUI cask costs two inbox items, two
+        // manifest entries, and a `pkg sync` that installs the cask and
+        // then asks the user to go fetch the app it just installed.
+        if let Some(caskroom) = self.caskroom() {
+            let owned = cask_owned_apps(caskroom);
+            for (provider, set) in &mut out {
+                if *provider == Provider::App {
+                    set.retain(|name, _| !owned.contains(name));
+                }
+            }
+        }
         out
+    }
+
+    #[must_use]
+    fn caskroom(&self) -> Option<&Path> {
+        self.active
+            .iter()
+            .find(|r| r.provider == Provider::Cask)
+            .map(|r| r.path.as_path())
     }
 
     #[must_use]
@@ -858,6 +881,38 @@ pub fn unsettled_formulae(cellar: &Path) -> bool {
     })
 }
 
+/// The `.app` bundles installed casks own, named the way the app
+/// detector names them. Homebrew records every artifact it would have
+/// to remove in each cask's install receipt, so this is a plain file
+/// read — the reconcile path never forks brew to ask.
+fn cask_owned_apps(caskroom: &Path) -> std::collections::HashSet<String> {
+    let mut owned = std::collections::HashSet::new();
+    let Ok(entries) = std::fs::read_dir(caskroom) else {
+        return owned;
+    };
+    for entry in entries.flatten() {
+        let receipt = entry.path().join(".metadata/INSTALL_RECEIPT.json");
+        let Ok(text) = std::fs::read_to_string(&receipt) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(artifacts) = json.get("uninstall_artifacts").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for app in artifacts
+            .iter()
+            .filter_map(|a| a.get("app")?.as_array())
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+        {
+            owned.insert(app.strip_suffix(".app").unwrap_or(app).to_string());
+        }
+    }
+    owned
+}
+
 /// Apps split by receipt: `.app` bundles named without the extension,
 /// App Store ones (carrying `_MASReceipt`) separated from
 /// drag-installs, versions from each `Info.plist`.
@@ -1115,6 +1170,69 @@ mod tests {
             mas.into_iter().collect::<Vec<_>>(),
             vec![("Bought".to_string(), None)]
         );
+    }
+
+    /// A cask install receipt, trimmed to the shape that matters:
+    /// homebrew lists every artifact it would remove, apps included.
+    fn cask_receipt(caskroom: &Path, token: &str, apps: &[&str]) {
+        let meta = caskroom.join(token).join(".metadata");
+        std::fs::create_dir_all(&meta).unwrap();
+        let artifacts: Vec<String> = apps
+            .iter()
+            .map(|a| format!(r#"{{"app":["{a}"]}}"#))
+            .chain([r#"{"manpage":["/Applications/x/man1/x.1"]}"#.to_string()])
+            .collect();
+        std::fs::write(
+            meta.join("INSTALL_RECEIPT.json"),
+            format!(
+                r#"{{"installed_on_request":true,"uninstall_artifacts":[{}]}}"#,
+                artifacts.join(",")
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_cask_and_the_app_it_drops_are_one_installed_thing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prefix = tmp.path().join("brew");
+        let caskroom = prefix.join("Caskroom");
+        let apps_dir = tmp.path().join("Applications");
+        for token in ["ghostty", "font-maple-mono"] {
+            std::fs::create_dir_all(caskroom.join(token).join("1.0")).unwrap();
+        }
+        cask_receipt(&caskroom, "ghostty", &["Ghostty.app"]);
+        cask_receipt(&caskroom, "font-maple-mono", &[]);
+        for app in ["Ghostty.app", "Handmade.app"] {
+            std::fs::create_dir_all(apps_dir.join(app).join("Contents")).unwrap();
+        }
+        std::fs::create_dir_all(prefix.join("Cellar")).unwrap();
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert("npm".to_string(), tmp.path().join("absent"));
+        overrides.insert("pnpm".to_string(), tmp.path().join("absent"));
+        let mut roots = detect_roots(
+            Some(prefix.as_path()),
+            Some(&apps_dir),
+            &overrides,
+            tmp.path().join("home").as_path(),
+        );
+        let installed = roots.installed();
+        let apps: Vec<&String> = installed
+            .iter()
+            .filter(|(p, _)| *p == Provider::App)
+            .flat_map(|(_, set)| set.keys())
+            .collect();
+        // The cask stays — it is the identity with an install command.
+        assert!(
+            installed
+                .iter()
+                .any(|(p, set)| *p == Provider::Cask && set.contains_key("ghostty"))
+        );
+        // Its bundle does not surface a second time…
+        assert!(!apps.iter().any(|a| a.as_str() == "Ghostty"), "{apps:?}");
+        // …while an app nobody's cask owns is still governed.
+        assert!(apps.iter().any(|a| a.as_str() == "Handmade"), "{apps:?}");
     }
 
     #[test]

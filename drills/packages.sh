@@ -107,6 +107,23 @@ rm -rf "$ROOT/Applications/SomeTool.app"; sleep 3
 mkdir -p "$ROOT/Applications/SomeTool.app"; sleep 3
 check "reinstalled ignored app NOT re-offered" "[ \"\$(inbox_count)\" = 0 ]"
 
+echo "=== a cask and the app it drops are one thing, not two"
+mkdir -p "$ROOT/brew/Caskroom/ghostty/1.3.1/.keep" \
+         "$ROOT/brew/Caskroom/ghostty/.metadata" \
+         "$ROOT/Applications/Ghostty.app/Contents"
+cat > "$ROOT/brew/Caskroom/ghostty/.metadata/INSTALL_RECEIPT.json" <<'JSON'
+{"installed_on_request":true,
+ "uninstall_artifacts":[{"app":["Ghostty.app"]},
+                        {"manpage":["/Applications/Ghostty.app/man1/ghostty.1"]}]}
+JSON
+sleep 3
+check "the cask is offered" "sqlite3 '$DB' \"SELECT subject FROM inbox WHERE resolved=0\" | grep -q 'cask:ghostty'"
+check "its bundle is not offered a second time" "! sqlite3 '$DB' \"SELECT subject FROM inbox WHERE resolved=0\" | grep -q 'app:Ghostty'"
+ID=$(sqlite3 "$DB" "SELECT id FROM inbox WHERE resolved=0 AND subject='cask:ghostty'")
+"$W" resolve "$ID" approve > /dev/null
+check "one manifest entry, under the kind that can reinstall it" \
+  "grep -q 'ghostty' '$MANIFEST' && [ \"\$(grep -c 'ghostty' '$MANIFEST')\" = 1 ]"
+
 echo "=== manifest member vanishes"
 rm -rf "$ROOT/brew/Cellar/ripgrep"
 sleep 3
