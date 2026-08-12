@@ -360,3 +360,64 @@ mod tests {
         assert_eq!(reparsed.remote, "git@example.com:store.git");
     }
 }
+
+/// Does this string look like a git remote at all?
+///
+/// The remote is late-bindable on purpose, so "not reachable yet" is a
+/// legitimate answer and must never be a refusal — a repository you are
+/// about to create is still the right remote. But a typo is not a
+/// remote that is merely unreachable, and saving one leaves the daemon
+/// pushing at nonsense forever with only `wukong remote ""` to undo it.
+/// So the check is about SHAPE, and it is deliberately permissive:
+/// anything with a scheme, anything in git's scp-like `user@host:path`
+/// form, and any filesystem path (a local bare repo is a fine remote).
+#[must_use]
+pub fn looks_like_remote(url: &str) -> bool {
+    let url = url.trim();
+    if url.is_empty() {
+        return false;
+    }
+    if url.contains("://") {
+        return true;
+    }
+    if let Some((host, path)) = url.split_once(':')
+        && host.contains('@')
+        && !path.is_empty()
+    {
+        return true;
+    }
+    url.starts_with('/') || url.starts_with('~') || url.starts_with("./") || url.starts_with("../")
+}
+#[cfg(test)]
+mod remote_shape_tests {
+    use super::looks_like_remote;
+
+    #[test]
+    fn a_typo_is_not_a_remote_that_is_merely_unreachable() {
+        // Every shape a real remote comes in.
+        for good in [
+            "git@github.com:saru-id/wukong.git",
+            "ssh://git@example.com/repo.git",
+            "https://github.com/saru-id/wukong.git",
+            "file:///srv/store.git",
+            "/Users/saru/wukong-dogfood/remotes/store.git",
+            "~/store.git",
+            "./store.git",
+            "../store.git",
+        ] {
+            assert!(looks_like_remote(good), "should be a remote: {good}");
+        }
+        // …and the answers that are not one.
+        for bad in [
+            "",
+            "   ",
+            "oops",
+            "y",
+            "n",
+            "github.com/saru/repo",
+            "no thanks",
+        ] {
+            assert!(!looks_like_remote(bad), "should be refused: {bad:?}");
+        }
+    }
+}

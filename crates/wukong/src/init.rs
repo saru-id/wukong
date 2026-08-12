@@ -146,7 +146,13 @@ pub fn first_run_welcome() {
 Backup/sync remote (git URL; Enter to skip): ",
     );
     if !url.is_empty() {
-        let _ = crate::remote::set(&url);
+        // On first run a wrong answer here is the likeliest of all —
+        // the prompt arrives before the user has seen anything — so say
+        // what happened and move on rather than saving it.
+        if let Err(e) = crate::remote::set(&url) {
+            println!("  {e}");
+            println!("  staying local-only — `wukong remote <url>` whenever you're ready");
+        }
     }
     println!();
 }

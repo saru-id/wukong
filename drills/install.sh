@@ -80,6 +80,15 @@ check "…on any verb, not just the one that found it" "[ ! -s \"$ROOT/pipe2.err
 check "bare wukong without a terminal explains itself" \
   "grep -q 'needs a terminal' \"$ROOT/tui.out\" && ! grep -q 'Device not configured' \"$ROOT/tui.out\""
 
+echo "=== a typo is not a remote"
+# The remote is late-bindable, so "not reachable yet" must never be a
+# refusal. A typo is a different thing, and saving one leaves the daemon
+# pushing at nonsense with only `wukong remote ""` to undo it.
+WUKONG_NO_AGENT=1 "$W" remote "oops" > "$ROOT/badremote.log" 2>&1
+check "a non-URL is refused" "grep -q \"doesn't look like a git remote\" \"$ROOT/badremote.log\""
+check "…and nothing was written to the config" \
+  "! grep -q 'remote = \"oops\"' \"$XDG_CONFIG_HOME/wukong/config.toml\""
+
 echo "=== the remote attaches late, safely"
 git init -q --bare -b main "$ROOT/late-remote.git"
 WUKONG_NO_AGENT=1 "$W" remote "$ROOT/late-remote.git" > "$ROOT/remote.log" 2>&1

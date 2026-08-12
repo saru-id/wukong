@@ -25,6 +25,16 @@ pub fn set(url: &str) -> anyhow::Result<()> {
     let config = Config::load()
         .map_err(|e| anyhow::anyhow!(e))?
         .ok_or_else(|| anyhow::anyhow!("this machine isn't set up yet — type `wukong` first"))?;
+    // Shape first, and only shape. A remote that is unreachable YET is
+    // a legitimate answer — that is the whole point of late binding —
+    // but a typo is not, and saving one leaves the daemon pushing at
+    // nonsense with only `wukong remote ""` to undo it.
+    anyhow::ensure!(
+        wukong_core::config::looks_like_remote(url),
+        "{url:?} doesn't look like a git remote — expected something like \
+         git@host:owner/repo.git, https://host/owner/repo.git, or a path \
+         to a bare repository. Nothing was changed."
+    );
     config.persist_remote(url)?;
     let store = Store::open(&paths::store_dir(), &config.machine)?;
     store.ensure_remote(url)?;
