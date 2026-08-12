@@ -1871,3 +1871,53 @@ fn an_unreachable_identity_store_never_becomes_a_new_key() {
     assert!(fresh.is_file());
     assert!(recipient_file.is_file());
 }
+
+/// An offer is a question about the file as it was. Both ways of
+/// answering "yes" must agree about what happens when the file is no
+/// longer there.
+#[test]
+fn approving_an_offer_whose_file_vanished_tracks_nothing() {
+    let mut rig = rig();
+    let gone = rig.home.join(".vanishing");
+    std::fs::write(&gone, "here for now\n").unwrap();
+    let rel = paths::store_rel(&gone).to_string_lossy().into_owned();
+    assert_eq!(rig.engine.offer_sentinel(&gone, &rel), 1);
+    std::fs::remove_file(&gone).unwrap();
+
+    let id = rig.engine.db.inbox_open().unwrap()[0].id;
+    let resp = rig.engine.resolve(id, Resolution::Approve);
+    assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
+    assert!(
+        !rig.engine.tracked_live.contains(&gone),
+        "a phantom in the roster is worse than a refusal"
+    );
+    // …and the unanswerable question does not stay open.
+    assert_eq!(rig.engine.db.inbox_count().unwrap(), 0);
+    // `wukong track` has always refused this; the two agree.
+    let direct = rig.engine.track(gone.to_str().unwrap(), false, false);
+    assert!(matches!(direct, Response::Error { .. }), "{direct:?}");
+}
+
+#[test]
+fn untracking_closes_the_held_change_it_leaves_behind() {
+    let mut rig = rig();
+    let file = track(&mut rig, ".secrets", "clean\n");
+    edit_and_settle(&mut rig, &file, &format!("token = {SECRET}\n"));
+    let held = rig
+        .engine
+        .db
+        .inbox_open()
+        .unwrap()
+        .into_iter()
+        .find(|i| i.kind() == Some(InboxKind::Quarantine))
+        .expect("quarantined");
+
+    rig.engine.untrack(file.to_str().unwrap());
+    // The quarantine asked "commit this secret?" about a file wukong
+    // no longer governs. There is no answer left to give.
+    let open = rig.engine.db.inbox_open().unwrap();
+    assert!(
+        !open.iter().any(|i| i.id == held.id),
+        "held change outlived the tracking: {open:?}"
+    );
+}

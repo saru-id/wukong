@@ -1421,6 +1421,16 @@ machine that holds the identity (and push)"
                     "untracked",
                 );
                 soft(self.db.record(EventKind::Untracked, &rel, ""));
+                // A held change belongs to a file wukong governs. Once
+                // it doesn't, the quarantine is unanswerable — approve
+                // would commit for a file with no mirror, and it would
+                // sit in the inbox forever otherwise. Skip is the
+                // honest close: the change stays out of git, which is
+                // what untracking already decided.
+                soft(
+                    self.db
+                        .inbox_resolve_open(InboxKind::Quarantine, &rel, Resolution::Skip),
+                );
                 Response::Ok {
                     message: format!("stopped tracking {}", paths::display(&live)),
                 }
@@ -1503,6 +1513,23 @@ skip keeps the change out of git"
         // other open offer under the path.
         if resolution == Resolution::Never && kind == Some(InboxKind::Sentinel) {
             return self.exclude(&paths::display(&live));
+        }
+
+        // An offer describes the file as it was when the question was
+        // asked. Approving one whose file has since gone would put a
+        // phantom in the roster: listed, marked missing, with nothing
+        // in the store to restore it from and no live copy to commit.
+        // `wukong track` refuses a path that is not a file; so does
+        // this, which is the same act by another route.
+        if kind == Some(InboxKind::Sentinel) && resolution == Resolution::Approve && !live.is_file()
+        {
+            soft(self.db.inbox_resolve(id, Resolution::Skip));
+            return Response::Error {
+                message: format!(
+                    "{} no longer exists — nothing to track, so the offer is closed",
+                    paths::display(&live)
+                ),
+            };
         }
 
         // Guard at the moment of consequence: offers skip forbidden
