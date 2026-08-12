@@ -411,10 +411,11 @@ impl App {
                 };
                 ListItem::new(Span::styled(
                     format!(
-                        " {} {}{}",
+                        " {} {}{}{}",
                         if f.exists { " " } else { "!" },
                         f.display,
-                        if f.sealed { "  [sealed]" } else { "" }
+                        if f.sealed { "  [sealed]" } else { "" },
+                        if f.shared { "  (shared)" } else { "" }
                     ),
                     style,
                 ))
@@ -440,7 +441,7 @@ impl App {
                 ListItem::new(Line::from(vec![
                     Span::styled(short_ts(&e.ts), Style::default().fg(Color::DarkGray)),
                     Span::raw("  "),
-                    Span::styled(format!("{:16}", e.kind), Style::default().fg(GOLD)),
+                    Span::styled(format!("{:16} ", e.kind), Style::default().fg(GOLD)),
                     Span::raw(e.subject.clone()),
                     if e.detail.is_empty() {
                         Span::raw("")
@@ -485,7 +486,11 @@ impl App {
                 ListItem::new(Line::from(vec![
                     Span::styled(format!(" {mark} {:36}", p.name), style),
                     Span::styled(
-                        format!("{version:14} {}", p.provider.as_str()),
+                        format!(
+                            "{version:14} {}{}",
+                            p.provider.as_str(),
+                            if p.shared { "  (shared)" } else { "" }
+                        ),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]))

@@ -228,6 +228,29 @@ echo "=== daemon log has timestamps + banner"
 check "startup banner with version" "grep -q 'wukongd .* starting — governing sandbox' '$ROOT/daemon.log'"
 check "log lines are timestamped" "grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' '$ROOT/daemon.log'"
 
+echo "=== the dashboard, rendered — what a person actually sees"
+# The TUI had no coverage because there was no way to look at it: without
+# a controlling terminal ratatui gets a 0x0 viewport and draws nothing, so
+# every assertion passed vacuously. tui_render.py opens a real pty and
+# replays the escape sequences into a grid, so these grep the FRAME.
+"$W" share ~/.gitconfig-custom > /dev/null 2>&1
+sleep 2
+python3 drills/tui_render.py "$W" 2 3 > "$ROOT/tui.txt" 2>&1
+check "the dashboard draws at all (not an empty viewport)" \
+  "grep -q 'wukong' \"$ROOT/tui.txt\" && [ \"\$(wc -l < \"$ROOT/tui.txt\")\" -gt 20 ]"
+check "every tab is on the bar" \
+  "grep -q 'Inbox' \"$ROOT/tui.txt\" && grep -q 'Files' \"$ROOT/tui.txt\" && grep -q 'Activity' \"$ROOT/tui.txt\" && grep -q 'Packages' \"$ROOT/tui.txt\" && grep -q 'Settings' \"$ROOT/tui.txt\""
+check "the status line names the machine" "grep -q 'sandbox' \"$ROOT/tui.txt\""
+# The lane and the seal are the two facts about a file that change what
+# it MEANS; the CLI has always shown both and the dashboard showed one.
+check "a shared file says so in the dashboard" "grep -q 'gitconfig-custom.*(shared)' \"$ROOT/tui.txt\""
+check "a sealed file says so in the dashboard" "grep -q '.env.*\[sealed\]' \"$ROOT/tui.txt\""
+# Two event kinds are exactly as wide as the column they are printed in.
+check "the activity column never runs into the subject" \
+  "! grep -qE '(setting-recorded|sentinel-changed)[^ ]' \"$ROOT/tui.txt\""
+python3 drills/tui_render.py "$W" q > "$ROOT/tui-quit.txt" 2>&1
+check "q quits without a panic" "! grep -qi 'panic' \"$ROOT/tui-quit.txt\""
+
 echo "=== doctor tells 'no key' apart from 'could not ask'"
 # An identity store that cannot be READ is not an empty one, and the
 # repair differs: importing a key over a store that is merely
