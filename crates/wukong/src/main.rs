@@ -1434,17 +1434,23 @@ fn doctor() {
     // this machine has never touched sealing.
     let id_store =
         wukong_core::seal::IdentityStore::from_config(config.seal.identity_file.as_deref());
-    let identity = id_store.load().ok().flatten();
+    let loaded = id_store.load();
     let recipient =
         std::fs::read_to_string(paths::store_dir().join(wukong_core::seal::RECIPIENT_REL)).ok();
-    match (identity, recipient) {
-        (None, None) => {}
-        (Some(_), None) => check(true, "seal identity present (nothing sealed yet)"),
-        (None, Some(_)) => check(
+    // "There is no key" and "the key store would not answer" are
+    // different diagnoses with different repairs, and doctor is the
+    // command whose entire job is to tell them apart. Importing a key
+    // over a keychain that is merely locked is the wrong move.
+    match (loaded, recipient) {
+        (Err(e), _) => check(false, &format!("cannot read the seal identity: {e}")),
+        (Ok(None), None) => {}
+        (Ok(Some(_)), None) => check(true, "seal identity present (nothing sealed yet)"),
+        (Ok(None), Some(_)) => check(
             false,
-            "store has sealed files but no identity here — `wukong seal-key import`",
+            "this store seals to a recipient no identity here matches — \
+             `wukong seal-key import`",
         ),
-        (Some(id), Some(r)) => {
+        (Ok(Some(id)), Some(r)) => {
             let unlocks = wukong_core::seal::encrypt(r.trim(), b"probe")
                 .is_ok_and(|probe| wukong_core::seal::decrypt(&id, &probe).is_ok());
             check(unlocks, "seal identity unlocks this store");

@@ -204,10 +204,20 @@ impl IdentityStore {
                     return Ok(None);
                 }
                 // A locked keychain lands here (152), as does a denied
-                // prompt and anything else securityd objects to.
+                // prompt and anything else securityd objects to — and
+                // it often says nothing at all, so the exit code is the
+                // only thing left to report.
+                let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                let why = if why.is_empty() {
+                    format!(
+                        "exit {} (a locked keychain answers 152)",
+                        out.status.code().unwrap_or(-1)
+                    )
+                } else {
+                    why
+                };
                 Err(SealError::Crypto(format!(
-                    "the keychain refused to hand over the seal identity: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
+                    "the keychain refused to hand over the seal identity: {why}"
                 )))
             }
             Self::File(path) => match std::fs::read_to_string(path) {

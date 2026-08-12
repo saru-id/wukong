@@ -228,6 +228,19 @@ echo "=== daemon log has timestamps + banner"
 check "startup banner with version" "grep -q 'wukongd .* starting — governing sandbox' '$ROOT/daemon.log'"
 check "log lines are timestamped" "grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' '$ROOT/daemon.log'"
 
+echo "=== doctor tells 'no key' apart from 'could not ask'"
+# An identity store that cannot be READ is not an empty one, and the
+# repair differs: importing a key over a store that is merely
+# unreachable is how sealed files get orphaned.
+mv "$ROOT/age.key" "$ROOT/age.key.bak"
+mkdir -p "$ROOT/age.key"
+"$W" doctor > "$ROOT/doctor-blocked.log" 2>&1
+check "doctor reports an unreadable identity as unreadable" \
+  "grep -q 'cannot read the seal identity' \"$ROOT/doctor-blocked.log\""
+check "…and does NOT tell you to import over it" \
+  "! grep -q 'seal-key import' \"$ROOT/doctor-blocked.log\""
+rmdir "$ROOT/age.key"; mv "$ROOT/age.key.bak" "$ROOT/age.key"
+
 echo "=== daemon status exit codes"
 check "daemon status exits 0 while running" "\"$W\" daemon status > /dev/null"
 
