@@ -185,6 +185,22 @@ echo "=== manifest syncs through the store"
 git clone -q -b sandbox "$ROOT/remote.git" "$ROOT/verify"
 check "remote carries the settings manifest" "grep -q 'fancyMode' '$ROOT/verify/__wukong__/settings.toml'"
 
+echo "=== a change that lands a moment late is still a change"
+# wukong reads preference plists; cfprefsd writes them on its own
+# schedule, a second or two after the click. Diffing the instant the
+# user presses Enter therefore finds nothing surprisingly often, and
+# "no setting changes detected" is the one answer capture must not get
+# wrong. Simulated here by writing the pref AFTER the diff starts.
+"$W" settings capture --start > /dev/null
+( sleep 1; pref com.apple.dock mineffect str scale ) &
+LATE=$!
+"$W" settings capture --diff > "$ROOT/late.txt" 2>&1
+wait $LATE
+check "a preference written after the diff began is still found" \
+  "grep -q 'mineffect' \"$ROOT/late.txt\""
+check "…and the empty answer names the cause when there really is none" \
+  "\"$W\" settings capture --start > /dev/null; \"$W\" settings capture --diff 2>&1 | grep -q 'a moment after the click'"
+
 echo "=== the diff's own advice has to work"
 # The diff closes with "N noisy change(s) filtered — --all shows them".
 # That is a command, and there has to be a snapshot left for it to read.

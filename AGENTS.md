@@ -157,7 +157,11 @@ application that may sit nearby on disk as `../wukong-backup`).
 - **Settings: read plists, write `defaults`, never the reverse.**
   Reads go straight to the preference plists (fast, forkless, the
   `plist` crate); writes MUST go through the `defaults` CLI or
-  `cfprefsd` will fight you. The reconcile is transition-based against
+  `cfprefsd` will fight you. But the files are cfprefsd's, written on
+  ITS schedule: a read taken the instant a user clicks a toggle can
+  miss a change that has definitely happened, so capture retries an
+  EMPTY diff before believing it, and a write is confirmed by reading
+  it back before anything is restarted. The reconcile is transition-based against
   `settings_state` with a `__meta__` baseline row; a change that
   matches the manifest's desired value acknowledges silently AND
   auto-resolves any stale offer. Bool/Int coercion and float epsilon

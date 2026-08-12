@@ -200,7 +200,7 @@ pub fn capture(phase: &CapturePhase, all: bool, json: bool) -> anyhow::Result<()
     match phase {
         CapturePhase::Start => return say_start(),
         CapturePhase::Diff => {
-            let changes = fetch_diff()?;
+            let changes = fetch_diff_settled()?;
             return present(&changes, all, json).map(|_| ());
         }
         CapturePhase::Interactive => {}
@@ -211,7 +211,7 @@ pub fn capture(phase: &CapturePhase, all: bool, json: bool) -> anyhow::Result<()
     std::io::stdout().flush()?;
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
-    let changes = fetch_diff()?;
+    let changes = fetch_diff_settled()?;
     let recordable = present(&changes, all, json)?;
     if json || recordable.is_empty() {
         return Ok(());
@@ -268,6 +268,32 @@ fn fetch_diff() -> anyhow::Result<Vec<CaptureChange>> {
     }
 }
 
+/// How many times an empty diff is retried, and how long between.
+/// Only the empty path pays this, and only ~2 seconds of it.
+const EMPTY_DIFF_RETRIES: usize = 3;
+const EMPTY_DIFF_WAIT: std::time::Duration = std::time::Duration::from_millis(700);
+
+/// The diff, not believing an empty answer the first time.
+///
+/// wukong reads preference plists directly, and cfprefsd writes those
+/// files on its own schedule — a second or two after the click that
+/// changed them. Diffing the instant the user presses Enter therefore
+/// finds nothing surprisingly often, and "no setting changes detected"
+/// is the one answer capture must not give wrongly: it tells the user
+/// wukong cannot see what they just did. Measured on a real machine —
+/// two Finder checkboxes were invisible at the first read and both
+/// present a moment later, against the same snapshot.
+fn fetch_diff_settled() -> anyhow::Result<Vec<CaptureChange>> {
+    for _ in 0..EMPTY_DIFF_RETRIES {
+        let changes = fetch_diff()?;
+        if !changes.is_empty() {
+            return Ok(changes);
+        }
+        std::thread::sleep(EMPTY_DIFF_WAIT);
+    }
+    fetch_diff()
+}
+
 /// Print the diff; return the numbered, recordable signal entries.
 fn present(
     changes: &[CaptureChange],
@@ -315,7 +341,9 @@ fn present(
     }
     if recordable.is_empty() && !all {
         println!(
-            "no setting changes detected ({noise_count} noisy change(s) filtered — --all shows them)"
+            "no setting changes detected ({noise_count} noisy change(s) filtered — --all shows them)\n\
+             macOS writes preferences a moment after the click — if you just changed \
+             something, run `wukong settings capture --diff` again"
         );
     } else if noise_count > 0 && !all {
         println!("({noise_count} noisy change(s) filtered — --all shows them)");

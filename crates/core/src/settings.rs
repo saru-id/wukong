@@ -1062,6 +1062,8 @@ const NOISE_KEY_MARKERS: &[&str] = &[
     "LastScan",
     "LastVacuum",
     "Timestamp",
+    // Spotlight stamps its own start; a real setting is never a clock.
+    "startTime",
     "SessionID",
     "session-id",
     "-uuid",
@@ -1186,6 +1188,7 @@ mod tests {
         // CloudDocs' daemon flips per-container notification keys as
         // iCloud syncs. Both arrived as "signal" in a live capture.
         assert!(is_noise_key("com.apple.dock", "mod-count"));
+        assert!(is_noise_key("com.apple.Spotlight", "startTime"));
         assert!(is_noise_key(
             "com.apple.bird.containers.notifications",
             "user_uid_501_iCloud_is_workflow_my_workflows_foreground"
