@@ -12,6 +12,14 @@ const MAGIC: &[u8] = b"\xff Go buildinf:";
 /// Module info is wrapped in 16-byte sentinels by the Go linker.
 const SENTINEL: usize = 16;
 
+/// The linker aligns the buildinfo header to 32 bytes and starts the
+/// inline strings right after it — magic (14) + pointer size + flags,
+/// then padding out to 32. Reading from byte 16 lands in that padding,
+/// finds a zero-length varint, and gives up; every real `go install`
+/// binary was invisible for exactly that reason, while a test that
+/// synthesized its own input without the padding passed happily.
+const HEADER_SIZE: usize = 32;
+
 /// Extract (module path, version) from a Go binary's bytes. The path
 /// is the `go install`-able identity ("github.com/junegunn/fzf"); the
 /// version is best-effort (locally built binaries carry "(devel)",
@@ -27,7 +35,7 @@ pub fn read(bytes: &[u8]) -> Option<(String, Option<String>)> {
     if header.get(1)? & 0b10 == 0 {
         return None;
     }
-    let (_go_version, rest) = varint_string(header.get(2..)?)?;
+    let (_go_version, rest) = varint_string(header.get(HEADER_SIZE - MAGIC.len()..)?)?;
     let (modinfo, _) = varint_string(rest)?;
     let inner = modinfo.get(SENTINEL..modinfo.len().checked_sub(SENTINEL)?)?;
     let text = std::str::from_utf8(inner).ok()?;
@@ -87,6 +95,9 @@ pub fn synthesize(module_path: &str, version: &str) -> Vec<u8> {
     out.extend_from_slice(MAGIC);
     out.push(8); // pointer size
     out.push(0b10); // inline strings
+    // Pad to the linker's 32-byte header before the inline strings —
+    // synthesizing without this is what let the parser be wrong.
+    out.resize(out.len() + HEADER_SIZE - MAGIC.len() - 2, 0);
     put_string(&mut out, b"go1.24.0");
     let sentinel = [0xabu8; SENTINEL];
     let mut modinfo = sentinel.to_vec();
@@ -118,6 +129,23 @@ mod tests {
     fn devel_builds_read_as_versionless() {
         let bytes = synthesize("example.com/tool", "(devel)");
         assert_eq!(read(&bytes), Some(("example.com/tool".to_string(), None)));
+    }
+
+    /// The header region lifted verbatim out of a binary `go install`
+    /// produced. The parser read the strings from byte 16 for as long
+    /// as it existed, which is inside the linker's padding, so every
+    /// real Go binary was invisible — and the synthetic blob above
+    /// hid it by being built to the same wrong shape. Reality is the
+    /// only fixture that could have caught this.
+    #[test]
+    fn reads_a_binary_go_install_actually_produced() {
+        let real = include_bytes!("../tests/fixtures/go-buildinfo.bin");
+        let (path, version) = read(real).expect("a real go binary must be readable");
+        assert_eq!(path, "golang.org/x/example/hello");
+        assert!(
+            version.is_some_and(|v| v.starts_with("v0.0.0-")),
+            "a module install carries its pseudo-version"
+        );
     }
 
     #[test]

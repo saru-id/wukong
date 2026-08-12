@@ -23,6 +23,17 @@ pub fn kickstart() -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// Is the installed agent older than the definition wukong now writes?
+/// Only asks about things whose absence breaks something: today, the
+/// PATH that lets the daemon find tools outside launchd's own.
+#[must_use]
+pub fn agent_is_stale() -> bool {
+    let Ok(existing) = std::fs::read_to_string(agent_path()) else {
+        return false;
+    };
+    !existing.contains("EnvironmentVariables")
+}
+
 pub fn agent_path() -> PathBuf {
     wukong_core::paths::home().join(format!("Library/LaunchAgents/{LABEL}.plist"))
 }
@@ -67,6 +78,10 @@ pub fn run(action: DaemonAction) -> anyhow::Result<()> {
             println!("wukongd stopped");
         }
         DaemonAction::Restart => {
+            // Rewrite the plist first: restart exists to pick changes
+            // up, and the agent's own definition is one of the things
+            // that can have changed under it.
+            install()?;
             launchctl(&["kickstart", "-k", &service])?;
             println!("wukongd restarted");
         }
@@ -180,11 +195,30 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// The PATH the agent runs with.
+///
+/// launchd gives an agent `/usr/bin:/bin:/usr/sbin:/sbin` and nothing
+/// else, so a daemon that asks a tool where it keeps its packages —
+/// `npm root -g`, `pnpm root -g` — never finds one. Those two providers
+/// reported "not found" on every machine where the daemon runs under
+/// launchd, which is every real installation; they worked only when a
+/// daemon was started from a shell, which is exactly what the drills
+/// do. Both Homebrew prefixes are named because a plist cannot ask
+/// which architecture it is on.
+fn agent_path_env() -> String {
+    let home = wukong_core::paths::home().to_string_lossy().into_owned();
+    format!(
+        "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:\
+         {home}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    )
+}
+
 fn plist() -> String {
     let bin = daemon_binary();
     let bin = xml_escape(&bin.to_string_lossy());
     let log = wukong_core::paths::state_dir().join("wukongd.log");
     let log = xml_escape(&log.to_string_lossy());
+    let path = xml_escape(&agent_path_env());
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -199,6 +233,8 @@ fn plist() -> String {
     <key>LowPriorityBackgroundIO</key><true/>
     <key>StandardOutPath</key><string>{log}</string>
     <key>StandardErrorPath</key><string>{log}</string>
+    <key>EnvironmentVariables</key>
+    <dict><key>PATH</key><string>{path}</string></dict>
 </dict>
 </plist>
 "#

@@ -1428,7 +1428,15 @@ fn doctor() {
         check(remote_reachable(&config.remote), "remote reachable");
     }
     check(client::connected(), "daemon running");
-    check(launchd::agent_path().exists(), "launchd agent installed");
+    let agent = launchd::agent_path().exists();
+    check(agent, "launchd agent installed");
+    if agent && launchd::agent_is_stale() {
+        check(
+            false,
+            "the launchd agent predates this wukong — it runs with launchd's bare \
+             PATH, so npm and pnpm cannot be found. `wukong daemon restart` rewrites it",
+        );
+    }
 
     // The seal lane: identity vs the store's recipient. Silent when
     // this machine has never touched sealing.

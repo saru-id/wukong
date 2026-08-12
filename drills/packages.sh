@@ -55,13 +55,18 @@ mkdir -p "$ROOT/npmroot/typescript" "$ROOT/npmroot/.bin" "$ROOT/cargohome" \
 printf '[v1]\n"ripgrep 14.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = ["rg"]\n' > "$ROOT/cargohome/.crates.toml"
 printf 'Gem::Specification' > "$ROOT/gemhome/specifications/colorls-1.4.6.gemspec"
 printf 'apple' > "$ROOT/Applications/Bought.app/Contents/_MASReceipt/receipt"
-# A synthetic Go binary: the real buildinfo blob layout, tiny.
+# A synthetic Go binary. The linker pads its buildinfo header to 32
+# bytes before the inline strings; a fixture without that padding is
+# readable only by a parser making the same mistake, which is exactly
+# how the go provider stayed broken while this drill passed.
 python3 - "$ROOT/gobin/fzf" <<'PY'
 import sys
 def vs(b): return bytes([len(b)]) + b
 sent = b"\xab" * 16
 mod = sent + b"path\tgithub.com/junegunn/fzf\nmod\tgithub.com/junegunn/fzf\tv0.46.1\th1:x=\n" + sent
-blob = b"junk-before" + b"\xff Go buildinf:" + bytes([8, 2]) + vs(b"go1.24.0") + vs(mod)
+header = b"\xff Go buildinf:" + bytes([8, 2])
+header += b"\x00" * (32 - len(header))
+blob = b"junk-before" + header + vs(b"go1.24.0") + vs(mod)
 open(sys.argv[1], "wb").write(blob)
 PY
 
