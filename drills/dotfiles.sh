@@ -140,6 +140,27 @@ sleep 2.5
 check "sentinel .zprofile offered" "sqlite3 '$DB' \"SELECT subject FROM inbox WHERE kind='sentinel' AND resolved=0\" | grep -q zprofile"
 check "forbidden credentials.json NOT offered" "! sqlite3 '$DB' 'SELECT subject FROM inbox' | grep -q credentials"
 
+echo "=== what a real \$HOME writes to itself, under the same sentinel"
+BEFORE=$(sqlite3 "$DB" "SELECT COUNT(*) FROM inbox WHERE kind='sentinel'")
+mkdir -p "$HOME/.config/zsh/.zsh_sessions" "$HOME/.config/zsh/.zcompcache" \
+         "$HOME/.config/copilot" "$HOME/.config/ed/db.mdb"
+echo 'x' > "$HOME/.config/zsh/.zsh_sessions/6E88DFB7-0FEA-4DC1-885C-41DF0E0DD79F.session"
+echo 'x' > "$HOME/.config/zsh/.zsh_sessions/_expiration_check_timestamp"
+echo 'x' > "$HOME/.config/zsh/.zcompcache/brew_casks"
+echo 'x' > "$HOME/.config/zsh/.zcompdump-host-5.9"
+: >     "$HOME/.config/homebrew-trust.json.lock"
+printf 'SQLite format 3\000\000token=ghp_realsecret\n' > "$HOME/.config/copilot/auth.db"
+echo 'x' > "$HOME/.config/copilot/auth.db-wal"
+printf '\000\001\002lmdb\n' > "$HOME/.config/ed/db.mdb/data.mdb"
+sleep 2.5
+AFTER=$(sqlite3 "$DB" "SELECT COUNT(*) FROM inbox WHERE kind='sentinel'")
+check "no offer for anything the machine wrote itself" "[ \"$BEFORE\" = \"$AFTER\" ]"
+check "a binary credential store is never offered" "! sqlite3 '$DB' 'SELECT subject FROM inbox' | grep -q 'auth.db'"
+# The rule must not have swallowed the sentinel tree wholesale.
+echo 'theme = dark' > "$HOME/.config/realapp.toml"
+sleep 2.5
+check "real config in the same tree is still offered" "sqlite3 '$DB' \"SELECT subject FROM inbox WHERE resolved=0\" | grep -q realapp"
+
 echo "=== push truthfulness + remote hygiene"
 OUT=$("$W" push)
 sleep 1

@@ -1712,3 +1712,122 @@ fn recorded_strays_carry_restart_hints() {
         .unwrap();
     assert_eq!(entry.restart.as_deref(), Some("Dock"));
 }
+
+/// The families a real `$HOME` produced on the first machine wukong
+/// ever governed, plus the ones that would arrive next.
+#[test]
+fn machine_written_files_are_recognized_and_real_config_is_not() {
+    let home = PathBuf::from("/Users/x");
+    for rel in [
+        ".config/zsh/.zsh_sessions/6E88DFB7-0FEA-4DC1-885C-41DF0E0DD79F.session",
+        ".config/zsh/.zsh_sessions/_expiration_check_timestamp",
+        ".config/zsh/.zcompcache/brew_casks",
+        ".config/zsh/.zcompdump-mini-5.9",
+        ".config/github-copilot/auth.db-wal",
+        ".config/github-copilot/auth.db-shm",
+        ".config/homebrew/trust.json.lock",
+        ".config/zed/prompts/prompts-library-db.0.mdb/data.mdb",
+        ".zsh_history",
+        ".lesshst",
+        ".viminfo",
+        ".cache/nvim/state",
+        "Library/Caches/app/blob",
+        ".local/state/tool/logs/today",
+        "project/node_modules/pkg/index.js",
+    ] {
+        assert!(
+            self_written(&home.join(rel)),
+            "should be self-written: {rel}"
+        );
+    }
+    // …and the files people actually keep, including the ones whose
+    // names brush against the rules.
+    for rel in [
+        ".zshrc",
+        ".config/git/config",
+        ".config/ghostty/config",
+        ".config/starship/starship.toml",
+        ".config/zed/settings.json",
+        "Library/LaunchAgents/com.google.keystone.agent.plist",
+        ".config/logstash/pipeline.conf",
+        ".config/cachetool/settings.yml",
+    ] {
+        assert!(!self_written(&home.join(rel)), "should be offered: {rel}");
+    }
+}
+
+#[test]
+fn the_inbox_is_offered_config_and_nothing_the_machine_wrote_itself() {
+    let mut rig = rig();
+    rig.engine.sentinel_dirs.push(rig.home.clone());
+    let write = |rel: &str, bytes: &[u8]| {
+        let path = rig.home.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        path
+    };
+
+    // A shell session file: one per terminal tab, named by UUID.
+    let session = write(
+        ".zsh_sessions/6E88DFB7-0FEA-4DC1-885C-41DF0E0DD79F.session",
+        b"x\n",
+    );
+    rig.engine.touch(session);
+    // A credential database: binary, so the content gate cannot read
+    // inside it — approving one would commit secrets under a clean
+    // verdict. Its NAME is innocent; only the bytes give it away.
+    let auth = write("copilot/auth.db", b"SQLite format 3\0\0\0token=ghp_realone");
+    rig.engine.touch(auth);
+    assert_eq!(rig.engine.tick(), 0, "nothing machine-written is offered");
+
+    // The control: an actual dotfile, in the same sentinel tree.
+    let zshrc = write(".zshrc", b"export A=1\n");
+    rig.engine.touch(zshrc);
+    assert_eq!(rig.engine.tick(), 1, "real config is still offered");
+    let open = rig.engine.db.inbox_open().unwrap();
+    assert_eq!(open.len(), 1);
+    assert_eq!(
+        Path::new(&open[0].subject).file_name().unwrap(),
+        ".zshrc",
+        "{open:?}"
+    );
+}
+
+#[test]
+fn offers_an_older_wukong_made_are_withdrawn_not_inherited() {
+    let mut rig = rig();
+    // Rows exactly as a version without the noise rules left them —
+    // the point is inheriting an inbox, so they go in behind today's
+    // offer path, which would refuse two of the three outright.
+    let offer = |rig: &mut Rig, rel: &str, bytes: &[u8]| {
+        let path = rig.home.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let subject = paths::store_rel(&path).to_string_lossy().into_owned();
+        rig.engine
+            .db
+            .inbox_add(
+                InboxKind::Sentinel,
+                &subject,
+                "changed — start tracking it?",
+                "",
+                "",
+            )
+            .unwrap();
+    };
+    offer(&mut rig, ".zsh_sessions/A1.session", b"x\n");
+    offer(&mut rig, "copilot/auth.db", b"SQLite format 3\0\0token");
+    offer(&mut rig, ".zshrc", b"export A=1\n");
+    assert_eq!(rig.engine.db.inbox_count().unwrap(), 3);
+
+    assert_eq!(rig.engine.retire_stale_offers(), 2);
+    let open = rig.engine.db.inbox_open().unwrap();
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(
+        Path::new(&open[0].subject).file_name().unwrap(),
+        ".zshrc",
+        "{open:?}"
+    );
+    // Withdrawing is idempotent — a restart must not re-count them.
+    assert_eq!(rig.engine.retire_stale_offers(), 0);
+}

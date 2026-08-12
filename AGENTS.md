@@ -41,9 +41,20 @@ application that may sit nearby on disk as `../wukong-backup`).
   marker exempts commits, never evidence); and detection anchors must
   tolerate diff prefixes (`+KEY=…` — the left boundary is
   "not-a-word-character", never a whitespace whitelist).
-- **Binary files** (NUL in the first 8KB) pass the content gate — line
-  rules over lossy text would spray entropy false positives. The
-  forbidden-name layer still applies.
+- **Binary files** (NUL in the first 8KB, `Scanned::binary` — the one
+  definition; never re-derive it) pass the content gate — line rules
+  over lossy text would spray entropy false positives. The
+  forbidden-name layer still applies, and binaries are never OFFERED:
+  a gate that cannot read inside a file must not invite the user to
+  commit it (`~/.config/github-copilot/auth.db` is a real example).
+- **A real `$HOME` writes to itself, and none of it is config.** Shell
+  session files, completion caches, database sidecars, lock files,
+  history: `self_written` in the engine keeps them out of the inbox,
+  filtered in `touch` so they never even reach the pending map. It
+  suppresses the QUESTION, never the answer — an explicit `wukong
+  track` on such a file still works. New rules ship with the drill
+  check that reproduces the family, and `retire_stale_offers` at
+  startup withdraws questions an older wukong already asked.
 - The engine (`wukongd/src/engine/`) is the single owner of all
   mutable state — `mod.rs` for the file flow, `packages.rs` for the
   reconcile machine, `tests.rs` for the tempdir suite. One writer, no

@@ -182,6 +182,9 @@ async fn main() -> anyhow::Result<()> {
     banner(&engine.config.machine);
     let notify_on = engine.config.notifications;
 
+    // Questions an older wukong asked that this one never would.
+    engine.retire_stale_offers();
+
     // Catch anything installed or changed while the daemon was down —
     // those count as new items worth a notification too.
     let startup_items = engine.reconcile() + engine.reconcile_settings();

@@ -403,10 +403,44 @@ impl Engine {
             return;
         }
         let relevant = self.tracked_live.contains(&path)
-            || (self.under_sentinel(&path) && !self.excluded(&path));
+            || (self.under_sentinel(&path) && !self.excluded(&path) && !self_written(&path));
         if relevant {
             self.pending.insert(path, Instant::now());
         }
+    }
+
+    /// Withdraw offers that today's rules would never have made.
+    ///
+    /// A machine that ran an older wukong carries its inbox forward:
+    /// thirty shell-session files and a credential database, asked
+    /// about once and open forever. The rule that stops asking has to
+    /// take back the questions too, or the fix only ever reaches
+    /// machines that never had the problem. `skip` is the honest
+    /// resolution — the item closes and promises nothing.
+    pub fn retire_stale_offers(&mut self) -> usize {
+        let Ok(open) = self.db.inbox_open() else {
+            return 0;
+        };
+        let mut retired = 0;
+        for item in open {
+            if item.kind() != Some(InboxKind::Sentinel) {
+                continue;
+            }
+            let live = paths::from_store_rel(Path::new(&item.subject));
+            if !self_written(&live) && !first_bytes_binary(&live) {
+                continue;
+            }
+            soft(self.db.inbox_resolve(item.id, Resolution::Skip));
+            retired += 1;
+        }
+        if retired > 0 {
+            soft(self.db.record(
+                EventKind::Health,
+                "inbox",
+                &format!("{retired} offer(s) withdrawn — machine-written files"),
+            ));
+        }
+        retired
     }
 
     /// The watcher lost events (queue overflow, forced rescan): treat
@@ -1078,6 +1112,15 @@ impl Engine {
         };
         let scanned = gate::scan_bytes(path, &bytes);
         if matches!(scanned.verdict, GateVerdict::Forbidden(_)) {
+            return 0;
+        }
+        // Binary files are not configuration. Nobody hand-edits a
+        // database or a cache blob, the diff in the offer body would be
+        // gibberish, and the content gate deliberately cannot read
+        // inside one — so an approved binary credential store (a real
+        // one: ~/.config/github-copilot/auth.db) would walk into git
+        // with a clean bill of health. Only offer what a person writes.
+        if scanned.binary {
             return 0;
         }
         let body = truncate_body(&gate::mask_all(
@@ -2083,6 +2126,106 @@ fn is_noise(path: &Path) -> bool {
         || name.starts_with(".#")
         || name == ".DS_Store"
         || path.components().any(|c| c.as_os_str() == ".git")
+}
+
+/// Directories holding state a machine writes for itself: one file per
+/// terminal tab, a completion cache regenerated on every brew install,
+/// downloads in flight. Matched case-insensitively as whole path
+/// components, with and without the leading dot, because every
+/// convention is in use somewhere under a real `~/.config`.
+const SELF_WRITTEN_DIRS: &[&str] = &[
+    "zsh_sessions",
+    "zcompcache",
+    "cache",
+    "caches",
+    "cacheddata",
+    "logs",
+    "node_modules",
+    "trash",
+    "crash reports",
+    "diagnosticreports",
+];
+
+/// Suffixes of files nothing hand-edits: lock and pid files, the
+/// sidecars a database keeps beside itself, half-finished downloads.
+const SELF_WRITTEN_SUFFIXES: &[&str] = &[
+    ".lock",
+    ".pid",
+    ".sock",
+    ".log",
+    ".bak",
+    ".old",
+    ".orig",
+    ".part",
+    ".crdownload",
+    ".download",
+    "-wal",
+    "-shm",
+    "-journal",
+    ".mdb",
+];
+
+/// Exact names of the files a shell, a pager, or a REPL appends to as
+/// you use it. Tracking one is a commit per command.
+const SELF_WRITTEN_NAMES: &[&str] = &[
+    ".zsh_history",
+    ".bash_history",
+    ".sh_history",
+    ".python_history",
+    ".node_repl_history",
+    ".sqlite_history",
+    ".psql_history",
+    ".mysql_history",
+    ".irb_history",
+    ".lesshst",
+    ".viminfo",
+    ".wget-hsts",
+    ".CFUserTextEncoding",
+    ".localized",
+];
+
+/// Is the file on disk binary? Reads only the window the gate judges
+/// by, so a huge blob costs one page, and answers `false` for anything
+/// unreadable — a file that cannot be read cannot be offered either.
+fn first_bytes_binary(path: &Path) -> bool {
+    use std::io::Read as _;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 8192];
+    let Ok(n) = file.read(&mut head) else {
+        return false;
+    };
+    gate::scan_bytes(path, &head[..n]).binary
+}
+
+/// Does the machine write this file to itself?
+///
+/// A real `$HOME` rewrites thousands of files nobody chose: shell
+/// session state named by UUID, completion caches, database sidecars,
+/// history appended to on every command. Offering them buries the
+/// three files that matter under thirty that don't, and approving one
+/// would commit on every keystroke — so they are never OFFERED.
+///
+/// This suppresses the question, never the answer: an explicit
+/// `wukong track` on such a file is still honoured. The user's machine,
+/// the user's call; wukong just stops asking.
+fn self_written(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    if SELF_WRITTEN_NAMES.contains(&name.as_ref())
+        || SELF_WRITTEN_SUFFIXES.iter().any(|s| name.ends_with(s))
+        || name.starts_with(".zcompdump")
+    {
+        return true;
+    }
+    path.components().any(|c| {
+        let component = c.as_os_str().to_string_lossy().to_lowercase();
+        let bare = component.strip_prefix('.').unwrap_or(&component);
+        SELF_WRITTEN_DIRS.contains(&bare)
+    })
 }
 
 fn now() -> String {

@@ -58,6 +58,18 @@ pub struct Scanned {
     /// decode or lossy replacement). Redaction must not proceed from
     /// such text — spans don't map back to the original bytes.
     pub reencoded: bool,
+    /// True when the bytes are binary: not something a person wrote by
+    /// hand, and content the rules can only read through a lossy view.
+    /// The single definition — callers that need to know must ask here
+    /// rather than re-deriving it and drifting.
+    pub binary: bool,
+}
+
+/// Binary by the only test cheap enough for every scan: a NUL byte in
+/// the first 8KB. UTF-16 text trips it, which is why the decode runs
+/// first and answers `false`.
+fn looks_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(8192).any(|&b| b == 0)
 }
 
 /// Exact file names that are never trackable, no matter the content.
@@ -249,6 +261,7 @@ pub fn scan_bytes(path: &Path, bytes: &[u8]) -> Scanned {
             verdict: GateVerdict::Forbidden(why),
             text: String::new(),
             reencoded: true,
+            binary: looks_binary(bytes),
         };
     }
 
@@ -258,10 +271,11 @@ pub fn scan_bytes(path: &Path, bytes: &[u8]) -> Scanned {
             verdict,
             text: decoded,
             reencoded: true,
+            binary: false,
         };
     }
 
-    let binary = bytes.iter().take(8192).any(|&b| b == 0);
+    let binary = looks_binary(bytes);
     let text = String::from_utf8_lossy(bytes);
     let reencoded = text.as_bytes() != bytes;
     let verdict = scan_text(&text, !binary);
@@ -269,6 +283,7 @@ pub fn scan_bytes(path: &Path, bytes: &[u8]) -> Scanned {
         verdict,
         text: text.into_owned(),
         reencoded,
+        binary,
     }
 }
 
