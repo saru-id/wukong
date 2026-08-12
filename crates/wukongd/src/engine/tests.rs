@@ -1968,3 +1968,36 @@ fn a_setting_reverted_to_its_default_withdraws_its_offer() {
         "an offer to record a value the machine no longer has: {open:?}"
     );
 }
+
+/// Offers inherited from a version that did not withdraw them: the key
+/// is gone, so the question is unanswerable and the answer it carries
+/// is wrong.
+#[test]
+fn setting_offers_for_keys_that_no_longer_exist_are_withdrawn_at_startup() {
+    let (mut rig, prefs) = settings_rig();
+    rig.engine.reconcile_settings();
+    // One key that still holds a value, one that does not — both with
+    // an offer open, exactly as an older wukong would have left them.
+    write_pref(&prefs, "com.apple.dock", "autohide", true.into());
+    for subject in ["com.apple.dock autohide", "com.apple.dock launchanim"] {
+        rig.engine
+            .db
+            .inbox_add(
+                InboxKind::Setting,
+                subject,
+                "setting changed — record it?",
+                "approve — record true as this machine's desired value",
+                "",
+            )
+            .unwrap();
+    }
+    assert_eq!(rig.engine.db.inbox_count().unwrap(), 2);
+
+    assert_eq!(rig.engine.retire_stale_offers(), 1);
+    let open = rig.engine.db.inbox_open().unwrap();
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(
+        open[0].subject, "com.apple.dock autohide",
+        "the key that still holds a value keeps its offer"
+    );
+}

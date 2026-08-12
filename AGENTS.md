@@ -55,6 +55,15 @@ application that may sit nearby on disk as `../wukong-backup`).
   track` on such a file still works. New rules ship with the drill
   check that reproduces the family, and `retire_stale_offers` at
   startup withdraws questions an older wukong already asked.
+- **A question dies with its subject.** An inbox item names something —
+  a file, a package, a preference key — and when that thing stops
+  existing the item goes with it, because the answer it carries is now
+  wrong, not merely stale: approving an offer for a reverted setting
+  writes the old value back, and approving one for a vanished file
+  tracks a phantom. Three paths enforce it (`resolve` on a missing
+  file, `untrack` on a held quarantine, the settings reconcile on a
+  vanished key) and `retire_stale_offers` catches what an older
+  version left behind.
 - The engine (`wukongd/src/engine/`) is the single owner of all
   mutable state — `mod.rs` for the file flow, `packages.rs` for the
   reconcile machine, `tests.rs` for the tempdir suite. One writer, no

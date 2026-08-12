@@ -428,11 +428,25 @@ impl Engine {
         };
         let mut retired = 0;
         for item in open {
-            if item.kind() != Some(InboxKind::Sentinel) {
-                continue;
-            }
-            let live = paths::from_store_rel(Path::new(&item.subject));
-            if !self_written(&live) && !first_bytes_binary(&live) {
+            let stale = match item.kind() {
+                Some(InboxKind::Sentinel) => {
+                    let live = paths::from_store_rel(Path::new(&item.subject));
+                    self_written(&live) || first_bytes_binary(&live)
+                }
+                // A setting offer names a value to record. If the key
+                // holds no value at all any more, that offer is a
+                // question about something that stopped existing —
+                // and approving it would write the old value back.
+                // Normally the reconcile withdraws it as the key
+                // vanishes; this catches the ones whose vanishing was
+                // acknowledged by a version that did not.
+                Some(InboxKind::Setting) => item
+                    .subject
+                    .split_once(' ')
+                    .is_some_and(|(domain, key)| !self.setting_is_set(domain, key)),
+                _ => false,
+            };
+            if !stale {
                 continue;
             }
             soft(self.db.inbox_resolve(item.id, Resolution::Skip));
@@ -442,10 +456,20 @@ impl Engine {
             soft(self.db.record(
                 EventKind::Health,
                 "inbox",
-                &format!("{retired} offer(s) withdrawn — machine-written files"),
+                &format!("{retired} offer(s) withdrawn — the subject is gone"),
             ));
         }
         retired
+    }
+
+    /// Does this preference key hold a value on this machine right now?
+    /// Absent prefs governance, nothing can be judged stale.
+    fn setting_is_set(&self, domain: &str, key: &str) -> bool {
+        let Some(prefs) = &self.prefs_dir else {
+            return true;
+        };
+        let wanted = std::iter::once((domain.to_string(), key.to_string())).collect();
+        !wukong_core::settings::read_current(prefs, &wanted).is_empty()
     }
 
     /// The watcher lost events (queue overflow, forced rescan): treat
